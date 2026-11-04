@@ -34,7 +34,7 @@ milliseconds" target was based on a wrong assumption about trace generation.
 |---|---:|---:|---:|
 | Result-cache hit p50 | <= 5 ms | <= 5 ms | <= 5 ms |
 | Simulate path (no QEMU), p50 | ~2.9 s | ~11.5 s | ~77 s |
-| Cold request (QEMU + simulation) p50 | TBD, QEMU blocked | TBD | TBD |
+| Cold request (QEMU + simulation) p50 | TBD; user-mode producer available | TBD | TBD |
 | Throughput per worker | ~0.35 req/s | ~0.09 req/s | ~0.013 req/s |
 
 Basis: 10k/30k rates measured on `domino.cfg` (~9.5–11 kips); long-trace rates
@@ -272,8 +272,8 @@ roughly 25–40 days.
 
 #### Step 0.1 — Baseline latency breakdown
 
-Status: **PARTIAL (2026-11-03)**. Simulation-path results are in section 9;
-QEMU rows are blocked on the Ampere QEMU 8.0 binary and tracked in Step 0.3.
+Status: **PARTIAL (2026-11-03)**. Simulation-path results are in section 9.
+The QEMU rows were blocked then; Step 0.3 now provides a user-mode producer.
 
 Goal: know where time goes before optimizing.
 
@@ -291,8 +291,8 @@ Acceptance: a table with median/min/max for the measured cases (3 reps where
 practical); derived phases (image, end-of-elaboration, simulation) are point
 estimates. A clear statement of whether trace generation or simulation
 dominates at each size. **Met for the simulation/trace path: fixed ~1.7 s,
-simulation ~9.5–11 kips, crossover ~20k instructions; QEMU rows are blocked in
-Step 0.3.**
+simulation ~9.5–11 kips, crossover ~20k instructions; QEMU rows were blocked
+then and are now covered by Step 0.3.**
 
 Subagent: execution subagent runs the timings; main agent records only the
 table.
@@ -391,16 +391,18 @@ Result:
 - Triggers: `start-tracing-after-instructions=1000`,
   `stop-tracing-after-measuring-instructions=500`, `max-traces=1`.
 - Plugin flags: `allow-missing-sysregs=true,flat-map=true`.
-- Output: `final_0.is.xz` (1.8 KiB, 500 measured instructions); `is_count`
-  parses it and reports a realistic mix (ADD/SUBS/LDR/branches/etc.).
+- Output: `mem_0.is.xz` (~2 KiB; `is_info`: 601 instructions = 500 measurement
+  + 101 cooldown, 112 memops, 54 memory events, 33 sysreg events); `is_count`
+  parses a realistic mix (ADD/SUBS/LDR/branches/etc.).
 
 Plugin changes required:
 - `allow-missing-sysregs`: user-mode QEMU's GDB XML lacks system registers
   such as `CNTKCTL_EL1`; the tracer now warns and skips them instead of
   exiting.
 - `flat-map` for `.is`: identity VA=PA mapping. The tracer skips sysreg-based
-  translation, sets instruction/memop PAs to their VAs, and skips PTE/memory
-  records. This is also the mapping the microbench server uses.
+  translation, sets instruction/memop PAs to their VAs, and reads memory
+  values through QEMU's virtual-memory path (54 memory events in the spike).
+  This is also the mapping the microbench server uses.
 - `INSTRUCTION_TRACER_SC_API_SHIM`: opt-in SystemC API-version stub for hosts
   whose `libsystemc` was built with a different `SC_CPLUSPLUS` (the plugin is
   loaded into QEMU, which has no SystemC ABI symbol).
@@ -451,10 +453,7 @@ limitations. **Met for trace production; `amperesys` still needs a flat
 page-table/TCR setup.**
 
 Subagent: execution subagent runs the comparisons; review subagent checks that
-no plugin source changes leaked into this step.
-
-**Gate 0.B:** choose the default QEMU mode (user-mode vs bare-metal
-system-mode) and the trigger mechanism.
+the plugin changes are scoped and system-mode behavior is unchanged.
 
 #### Step 0.4 — gRPC/Nix/CMake build spike
 
@@ -644,7 +643,7 @@ checks state isolation and zombie/fd handling.
 
 **Gate 1:** the revised targets in section 1 are met: result-cache hit
 <= 5 ms, simulate path within the stated times, and QEMU absent on a hit. The
-cold QEMU number may still be TBD until Step 0.3 is unblocked. Until
+cold QEMU number can now be measured with the Step 0.3 user-mode producer. Until
 `SimulationRunner` exists (Step 3.2), measure through a temporary `amperesys`
 subprocess shim and label the numbers as shim-only. Do not finalize the phase-2
 deferral until at least one cold QEMU request has been measured. If the targets
@@ -979,6 +978,12 @@ rate from 10k to 30k is ~11.5 kips; long runs are 10.6–13.6 kips.
 | `qemu-aarch64` tiny static binary, no plugin | 0.023 | n/a | n/a | n/a | 0.023 |
 | system-mode + Linux | blocked | blocked | blocked | blocked | blocked |
 
+Step 0.3 addendum: user-mode QEMU 8.0 + the patched plugin produced a
+601-instruction `.is.xz` (500 measurement, 101 cooldown; 112 memops, 54 memory
+events, 33 sysreg events) from a static `tiny_arm` loop. `is_info` and
+`is_count` parse it; `amperesys` still needs a flat page-table/TCR setup for
+this trace (Step 2.1).
+
 ### Step 0.1 findings
 
 - **Fixed cost for a microbench-sized trace is ~1.7 s**: 13 ms launch +
@@ -1010,10 +1015,10 @@ rate from 10k to 30k is ~11.5 kips; long runs are 10.6–13.6 kips.
 ### Blocked measurements
 
 - QEMU system-mode + Linux: needs the patched kernel image and rootfs.
-- QEMU user-mode trace generation: needs the Ampere QEMU 8.0 binary
-  (`ampere.qemu` from the Nix environment); the system QEMU is incompatible
-  with the installed plugin.
-- Cold-request total (QEMU + simulation): blocked on the above.
+- QEMU user-mode trace generation: **resolved in Step 0.3** with the Ampere
+  QEMU 8.0 build and the patched plugin.
+- Cold-request total (QEMU + simulation): can now be measured once the runner
+  exists.
 
 ## 10. Definition of done
 

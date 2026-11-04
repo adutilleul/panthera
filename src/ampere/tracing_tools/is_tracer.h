@@ -386,13 +386,14 @@ public:
         }
 
         for (const auto& memop : instruction.memops) {
-            if (memop.pa) {
+            if (flat_map || memop.pa) {
+                const uint64_t mem_pa = flat_map ? memop.va.value() : memop.pa.value().value();
                 if (memop.is_store) {
                     // write memory events to instruction stream and record which bytes in memory have been written to
-                    uint64_t curr_pa = memop.pa.value().value();
+                    uint64_t curr_pa = mem_pa;
                     size_t size_written = 0;
 
-                    while (curr_pa < memop.pa.value().value() + (uint64_t)memop.bytes) {
+                    while (curr_pa < mem_pa + (uint64_t)memop.bytes) {
                         size_t size_left = ((uint64_t)memop.bytes - size_written) % 8;
                         size_t granularity = (size_left == 0 ? 8 : size_left);
                         uint64_t val = 0;
@@ -415,11 +416,17 @@ public:
                 else {
                     // If there exists any other store to the same address in this instruction, ignore this load.
                     bool ignore_load = false;
-                    PhysAddr target_addr = memop.pa.value();
+                    PhysAddr target_addr = PhysAddr(mem_pa);
                     for (unsigned i = 0; i < instruction.memops.size(); i++) {
-                        if (instruction.memops[i].is_store && instruction.memops[i].pa
-                            && instruction.memops[i].pa.value() == target_addr)
-                        {
+                        const auto& other = instruction.memops[i];
+                        if (!other.is_store)
+                            continue;
+                        if (flat_map) {
+                            if (other.va.value() == mem_pa) {
+                                ignore_load = true;
+                                break;
+                            }
+                        } else if (other.pa && other.pa.value() == target_addr) {
                             ignore_load = true;
                             break;
                         }
@@ -428,7 +435,7 @@ public:
                     if (!ignore_load) {
                         size_t size_read = 0;
                         PhysAddr curr_pa = target_addr;
-                        while (curr_pa < memop.pa.value() + (uint64_t)memop.bytes) {
+                        while (curr_pa < PhysAddr(mem_pa) + (uint64_t)memop.bytes) {
                             size_t size_left = ((uint64_t)memop.bytes - size_read) % 8;
                             size_t granularity = (size_left == 0 ? 8 : size_left);
                             handle_load_memop(curr_pa, granularity);

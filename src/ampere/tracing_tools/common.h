@@ -112,18 +112,24 @@ public:
 class QEMUMemoryAccessor : public MemoryAccessor
 {
 public:
-    QEMUMemoryAccessor() = default;
+    explicit QEMUMemoryAccessor(bool use_virtual_memory = false) : use_virtual_memory(use_virtual_memory) {}
 
-    bool read_memory(uint64_t pa, uint8_t* result, size_t len) override
+    bool read_memory(uint64_t addr, uint8_t* result, size_t len) override
     {
-        return qemu_plugin_read_phys_memory(pa, result, len, 0 /* ARMASIdx_NS */) == 0;
+        if (use_virtual_memory)
+            return qemu_plugin_read_memory(addr, result, len);
+        return qemu_plugin_read_phys_memory(addr, result, len, 0 /* ARMASIdx_NS */) == 0;
     }
+
+private:
+    bool use_virtual_memory{false};
 };
 
 class QEMUStateAccessor : public StateAccessor, public QEMUMemoryAccessor
 {
 public:
-    explicit QEMUStateAccessor(bool allow_missing_sysregs = false) : allow_missing_sysregs(allow_missing_sysregs)
+    explicit QEMUStateAccessor(bool allow_missing_sysregs = false, bool use_virtual_memory = false)
+        : QEMUMemoryAccessor(use_virtual_memory), allow_missing_sysregs(allow_missing_sysregs)
     {
         build_sysreg_index_map();
         find_vector_register_names();

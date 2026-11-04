@@ -181,7 +181,7 @@ void plugin_reset_callback(qemu_plugin_id_t id);
 static void allocate_state_accessor()
 {
     if (!stateaccessor) {
-        stateaccessor = new tracer::QEMUStateAccessor(allow_missing_sysregs);
+        stateaccessor = new tracer::QEMUStateAccessor(allow_missing_sysregs, flat_map);
     }
 }
 

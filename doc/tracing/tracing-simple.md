@@ -106,8 +106,12 @@ General options:
         STOP_MEASUREMENT marker at the end of the region of
         interest (default 10000)
   flat-map=[true|false]
-        Instead of preserving the existing page tables, convert
-        them to a flat mapping (only affects ELF tracer) (default: false)
+        Use an identity VA=PA mapping instead of preserving the existing page
+        tables (applies to instruction-stream and ELF tracing).
+        (default: false)
+  allow-missing-sysregs=[true|false]
+        Continue when QEMU's GDB XML lacks a required system register
+        (needed for user-mode tracing). (default: false)
   elf-entry-point=ENTRY_POINT
         The first entry point to consider for the generated ELF file
         (both PA and VA) (default: 0x40000000)
@@ -163,3 +167,28 @@ Stop triggering options (select only one method)
   pc-stop-count=N
         Count for pc-stop-trigger= (default 0),
 ```
+
+## User-mode tracing
+
+The plugin also works under `qemu-aarch64` (linux-user) on a static AArch64
+binary, without a kernel or rootfs. User-mode QEMU has no system registers, so
+enable `allow-missing-sysregs` and use an identity mapping:
+
+```sh
+qemu-aarch64 \
+  -plugin $PREFIX/lib/libinstruction_tracer.so,\
+trace-filename-base=my_trace,\
+start-tracing-after-instructions=1000,\
+stop-tracing-after-measuring-instructions=500,\
+max-traces=1,allow-missing-sysregs=true,flat-map=true \
+  -d plugin -D trace.log \
+  ./my_static_benchmark
+```
+
+`flat-map=true` sets instruction and memory physical addresses equal to their
+virtual addresses and reads memory values through QEMU's virtual-memory path.
+The resulting `.is` has no TCR/TTBR page-table setup, so the simulator needs a
+flat mapping (or the in-process runner) to consume it.
+
+The user-mode plugin requires the tracing-QEMU build; upstream QEMU does not
+expose the Ampere plugin APIs used by the tracer.
