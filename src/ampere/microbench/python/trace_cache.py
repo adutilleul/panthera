@@ -18,6 +18,9 @@ from simulation_runner import SimulationResult
 
 CACHE_SCHEMA = 1
 
+_config_cache: dict[str, tuple[dict, list[tuple[str, int, int, int]]]] = {}
+_config_cache_lock = threading.Lock()
+
 
 def file_fingerprint(path: str | os.PathLike | None, hash_contents: bool = False) -> dict:
     if path is None:
@@ -53,20 +56,74 @@ JSON_INCLUDE = re.compile(r"@([^\s,\]\}]+)")
 
 
 def config_fingerprint(path: str | os.PathLike | None, seen: set[str] | None = None, depth: int = 0) -> dict:
-    """Hash a config and every file reachable through :cfg/:append-cfg/:override-cfg."""
+    """Hash a config and every file reachable through :cfg/:append-cfg/:override-cfg.
+
+    The top-level result is memoized and revalidated with the size/mtime/ctime
+    of every file that contributed to it. Repeated requests therefore avoid
+    re-reading and re-parsing the whole config include tree while still
+    noticing edits, additions, and removals.
+    """
     if path is None:
         return {"missing": True}
     entry = Path(path)
     if not entry.exists():
         return {"path": str(entry), "missing": True}
+    if depth > 0 or seen is not None:
+        return _config_fingerprint(entry, set() if seen is None else seen, depth, [])
+
+    resolved = str(entry.resolve())
+    with _config_cache_lock:
+        cached = _config_cache.get(resolved)
+    if cached is not None:
+        result, stamps = cached
+        if _stamps_current(stamps):
+            return result
+
+    stamps: list[tuple[str, int, int, int]] = []
+    result = _config_fingerprint(entry, set(), 0, stamps)
+    with _config_cache_lock:
+        _config_cache[resolved] = (result, stamps)
+    return result
+
+
+def _stamp(path: Path, stamps: list[tuple[str, int, int, int]]) -> None:
+    try:
+        stat = path.stat()
+    except OSError:
+        stamps.append((str(path), -1, -1, -1))
+        return
+    stamps.append((str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+
+
+def _stamps_current(stamps: list[tuple[str, int, int, int]]) -> bool:
+    for path, size, mtime_ns, ctime_ns in stamps:
+        try:
+            stat = Path(path).stat()
+        except OSError:
+            if size != -1:
+                return False
+            continue
+        if size == -1 or stat.st_size != size or stat.st_mtime_ns != mtime_ns or stat.st_ctime_ns != ctime_ns:
+            return False
+    return True
+
+
+def _config_fingerprint(
+    entry: Path,
+    seen: set[str],
+    depth: int,
+    stamps: list[tuple[str, int, int, int]],
+) -> dict:
+    if not entry.exists():
+        _stamp(entry, stamps)
+        return {"path": str(entry), "missing": True}
     if depth > 32:
         return {"path": str(entry.resolve()), "error": "include depth"}
     resolved = str(entry.resolve())
-    if seen is None:
-        seen = set()
     if resolved in seen:
         return {"path": resolved, "cycle": True}
     seen.add(resolved)
+    _stamp(entry, stamps)
     try:
         digest = hashlib.sha256(entry.read_bytes()).hexdigest()
         lines = entry.read_text(errors="replace").splitlines()
@@ -79,11 +136,12 @@ def config_fingerprint(path: str | os.PathLike | None, seen: set[str] | None = N
             child = Path(match.group("file").strip("'\""))
             if not child.is_absolute():
                 child = entry.parent / child
-            includes.append(config_fingerprint(child, seen, depth + 1))
+            includes.append(_config_fingerprint(child, seen, depth + 1, stamps))
         for json_file in JSON_INCLUDE.findall(line):
             child = Path(json_file.strip("'\""))
             if not child.is_absolute():
                 child = entry.parent / child
+            _stamp(child, stamps)
             includes.append({"json": file_fingerprint(child, hash_contents=True)})
     return {"path": resolved, "sha256": digest, "includes": includes}
 

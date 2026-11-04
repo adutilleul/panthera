@@ -81,6 +81,24 @@ class ConfigFingerprintTest(unittest.TestCase):
             fingerprint = config_fingerprint(root)
             self.assertTrue(fingerprint["includes"][0]["missing"])
 
+    def test_repeated_fingerprint_is_memoized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root.cfg"
+            root.write_text(":cfg child.cfg\n")
+            (Path(directory) / "child.cfg").write_text("setting 1\n")
+            first = config_fingerprint(root)
+            self.assertIs(first, config_fingerprint(root))
+
+    def test_appearing_include_invalidates_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root.cfg"
+            root.write_text(":cfg child.cfg\n")
+            first = config_fingerprint(root)
+            self.assertTrue(first["includes"][0]["missing"])
+            (Path(directory) / "child.cfg").write_text("setting 1\n")
+            second = config_fingerprint(root)
+            self.assertNotIn("missing", second["includes"][0])
+
 
 class ResultCacheTest(unittest.TestCase):
     def test_put_get(self):

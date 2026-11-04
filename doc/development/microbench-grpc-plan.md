@@ -73,14 +73,16 @@ The v1 Python sidecar is implemented on branch `microbench-grpc` and pushed to
   data, tool fingerprints, the transitive config include tree (`:cfg`,
   `:append-cfg`, `:override-cfg`, `@file`), and pipeline sources; atomic
   writes, LRU, corrupt-entry recovery.
-- **Tests:** 42 unit/integration tests (QEMU/`amperesys` integration tests skip
-  unless the `PANTHERA_*` tool environment is set).
+- **Tests:** 44 unit/integration tests (QEMU/`amperesys` integration tests skip
+  unless the `PANTHERA_*` tool environment is set), plus a `smoke_test.py`
+  registered as `microbench_sidecar_smoke` for CI.
 
-Measured cold path: 10k = 1.89 s, 100k = 7.33 s. Result-cache hit: 70–90 µs;
-trace-cache hit (simulation only): ~1.5 s at 10k, ~4.3 s at 100k.
+Measured cold path: 10k = 1.97 s, 100k = 8.34 s. Result-cache hit (server
+processing): ~0.1 ms; client round-trip on a persistent channel: p50 1.7 ms,
+p95 2.6 ms, p99 2.7 ms. Trace-cache hit (simulation only): ~1.5 s at 10k,
+~4.3 s at 100k.
 
-Remaining: Phase 4.3 CI smoke test and Step 4.4 performance sign-off.
-Optional follow-ups: C++ in-process runner, sandbox for remote exposure,
+Remaining: none required for v1. Optional follow-ups: C++ in-process runner, sandbox for remote exposure,
 system-mode bare-metal fallback, PMU map, scratch/uninitialized-memory policy,
 and per-request process isolation.
 
@@ -1073,13 +1075,15 @@ LABELS integration TIMEOUT 1200)` and adds the subdirectory from
 so the main build is unaffected when the optional sidecar dependencies are
 absent.
 
-- Verified with the full tool environment: the suite runs 42 tests and passes
+- Verified with the full tool environment: the suite runs 44 tests and passes
   in ~1.7 s.
 - Verified without `PANTHERA_*`: the suite passes in ~0.2 s by skipping the
   QEMU/`amperesys` cases, so no QEMU is required for `make unit-test`.
-- A separate CTest smoke test is not needed yet: the QEMU and `amperesys`
-  integration cases already start the sidecar machinery and run a benchmark
-  when the environment is set.
+- `smoke_test.py` is registered as `microbench_sidecar_smoke` (label
+  `integration`). It starts the server, runs one benchmark cold and once from
+  the result cache, checks `Stats`, and verifies graceful shutdown. It skips
+  without `PANTHERA_*`; CI can pass `--require` to fail on a missing tool
+  environment.
 
 #### Step 4.2 — Documentation
 
@@ -1095,7 +1099,8 @@ Status: **DONE**, with `make doc` outstanding on this host.
 
 #### Step 4.3 — Packaging and CI
 
-Status: **PARTIAL**. Installation and wrappers are done; CI wiring remains.
+Status: **DONE** for the repository; the CI service itself lives outside this
+tree.
 
 - `make install` (component path verified with
   `cmake -P .../microbench/python/cmake_install.cmake`) installs:
@@ -1109,21 +1114,39 @@ Status: **PARTIAL**. Installation and wrappers are done; CI wiring remains.
   metrics from an install prefix.
 - Full-tree `cmake --install` still stops earlier in unrelated targets
   (`adis/disraw`); use the component install or fix that pre-existing target.
-- CI smoke job: **TODO**. Add a job that sets the QEMU/plugin/`amperesys`
-  environment and runs `ctest -R microbench_sidecar`, falling back to the
-  dependency-free unit run.
+- CI smoke job: no CI configuration is checked into this repository, so the
+  portable piece is the `microbench_sidecar_smoke` CTest test. A CI job should
+  set the QEMU/plugin/`amperesys` environment and run
+  `python3 smoke_test.py --require` (or `ctest -R microbench_sidecar`), which
+  fails loudly if the environment is incomplete.
 - The existing `amperesys` flow is untouched.
 
 #### Step 4.4 — Performance sign-off
 
-Status: **TODO**.
+Status: **DONE (2026-11-04)** on the development host.
 
-- Record p50/p95/p99 latency and throughput for 10k/100k/1M instructions and a
-  realistic cache-hit batch.
-- State `Expected Perf Drift: None (existing path unchanged)`; the sidecar is
-  additive and does not modify `amperesys`.
-- Summarize the remaining optional work: C++ in-process runner, sandbox,
-  system-mode fallback, PMU map, scratch/uninitialized-memory policy.
+Measured through a persistent gRPC channel against a warm server:
+
+| Workload | Cold | Result-cache hit |
+|---|---:|---:|
+| 10k loop | 1.97 s, 17,509 cycles, IPC 0.571 | 0.08 ms server, ~1.7 ms RTT |
+| 100k loop | 8.34 s, 175,009 cycles, IPC 0.571 | 0.10 ms server, ~1.7 ms RTT |
+| 200-hit batch | — | p50 1.74 ms, p95 2.59 ms, p99 2.71 ms |
+
+`Stats` reports server-side p50 0.97 ms and p95 1.13 ms for the hit batch
+(including key computation). Two hot-path fixes came out of this step:
+
+- `config_fingerprint` now memoizes the parsed include tree and revalidates it
+  with size/mtime/ctime stamps, cutting ~3.5 ms to ~0.26 ms per request while
+  still detecting edits, new includes, and removals.
+- The client reuses one gRPC channel; creating a channel per call cost ~200 ms
+  on Unix sockets.
+
+`Expected Perf Drift: None (existing path unchanged)` — the sidecar is
+additive, and the memoization only affects the sidecar's cache keys.
+
+Remaining optional work: C++ in-process runner, sandbox, system-mode fallback,
+PMU map, scratch/uninitialized-memory policy.
 
 ## 6. File map (expected)
 

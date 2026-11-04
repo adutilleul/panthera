@@ -9,19 +9,33 @@ import sys
 import grpc
 from microbench_server import DEFAULT_LISTEN, SERVICE, pb
 
+_channels: dict[str, grpc.Channel] = {}
+
+
+def _channel(address, timeout):
+    """Return a cached channel; connection setup costs ~200 ms per channel."""
+    channel = _channels.get(address)
+    if channel is None:
+        channel = grpc.insecure_channel(address)
+        _channels[address] = channel
+    grpc.channel_ready_future(channel).result(timeout=timeout)
+    return channel
+
+
+def reset_channels():
+    for channel in _channels.values():
+        channel.close()
+    _channels.clear()
+
 
 def _call(address, method_name, request, request_type, response_type, timeout=5):
-    channel = grpc.insecure_channel(address)
-    try:
-        grpc.channel_ready_future(channel).result(timeout=timeout)
-        method = channel.unary_unary(
-            f"/{SERVICE}/{method_name}",
-            request_serializer=request_type.SerializeToString,
-            response_deserializer=response_type.FromString,
-        )
-        return method(request, timeout=timeout)
-    finally:
-        channel.close()
+    channel = _channel(address, timeout)
+    method = channel.unary_unary(
+        f"/{SERVICE}/{method_name}",
+        request_serializer=request_type.SerializeToString,
+        response_deserializer=response_type.FromString,
+    )
+    return method(request, timeout=timeout)
 
 
 def call(address, request, timeout=5):

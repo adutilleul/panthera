@@ -140,8 +140,9 @@ includes 1000 cooldown instructions so `amperesys` can drain short benchmarks.
 - `--cache-dir` (XDG-aware), `--cache-size-mb` (total, default 1024), and
   `--no-cache`. Keys cover code, caps, data, tool fingerprints, the transitive
   config include tree, and pipeline sources.
-- Result-cache hits are typically 70–90 µs. Trace-cache hits skip QEMU but
-  still simulate.
+- Result-cache hits take ~0.1 ms of server processing (~2 ms client
+  round-trip on a persistent channel). Trace-cache hits skip QEMU but still
+  simulate.
 
 ## Health, stats, and shutdown
 
@@ -151,7 +152,7 @@ microbench-client --listen unix:///tmp/panthera-microbench.sock --stats
 ```
 
 `Stats` reports request, queue, cache, trace, simulation, rejection, deadline,
-and error counters plus p50/p95 request latency.
+and error counters plus p50/p95/p99 request latency.
 
 ## Security
 
@@ -181,3 +182,11 @@ python3 -m unittest -v test_qemu_trace_source test_simulation_runner \
 The QEMU/`amperesys` integration tests skip unless the `PANTHERA_*` tool
 environment is set. CTest registers the suite as
 `microbench_sidecar_python_test` (label `integration`).
+
+For a single end-to-end check (start the server, run cold and cached requests,
+check `Stats`, and shut down):
+
+```bash
+python3 smoke_test.py            # skips without PANTHERA_* tools
+python3 smoke_test.py --require  # CI: fail instead of skipping
+```

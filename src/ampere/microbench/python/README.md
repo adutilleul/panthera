@@ -97,7 +97,7 @@ amperesys -cfg <panthera-root>/install/config/model/sys/siryn.cfg \
 runner is configured (`--amperesys`/`--config` or the environment); otherwise it
 returns the trace metadata with `cycles=0`. The runner starts a fresh
 `amperesys` per request, so its ~1.4 s startup dominates very small
-benchmarks. Cold-path totals measured here: 10k = 1.89 s, 100k = 7.33 s
+benchmarks. Cold-path totals measured here: 10k = 1.97 s, 100k = 8.34 s
 (trace + simulation).
 
 Results are cached under `--cache-dir` (default
@@ -105,9 +105,9 @@ Results are cached under `--cache-dir` (default
 total size cap (`--cache-size-mb`, default 1024; `--no-cache` disables
 caching). The key covers the code, caps, trace options, tool fingerprints, the
 transitive config include tree, and the pipeline source files. Responses report
-`cache=miss|trace|result`; a result hit returns the original metrics in about
-70–90 µs with no QEMU or `amperesys`. Corrupt or incomplete entries are
-removed and regenerated.
+`cache=miss|trace|result`; a result hit returns the original metrics after
+about 0.1 ms of server processing (~2 ms client round-trip) with no QEMU or
+`amperesys`. Corrupt or incomplete entries are removed and regenerated.
 
 ## Tests
 
@@ -125,6 +125,10 @@ CMake registers the same suite as `microbench_sidecar_python_test` (label
 ```sh
 ctest --test-dir cmake-build-release -R microbench_sidecar --output-on-failure
 ```
+
+`smoke_test.py` is a single end-to-end check (start the server, run cold and
+cached requests, check `Stats`, shut down). It skips without the tool
+environment unless `--require` is passed.
 
 ## Not yet
 

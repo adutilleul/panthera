@@ -24,6 +24,7 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(counters["queued"], 1)
         self.assertEqual(timings["request_p50_ms"], 10.0)
         self.assertEqual(timings["request_p95_ms"], 20.0)
+        self.assertEqual(timings["request_p99_ms"], 20.0)
 
     def test_stats_response(self):
         microbench_server._metrics.inc("requests")

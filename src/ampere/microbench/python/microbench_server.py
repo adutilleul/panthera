@@ -86,7 +86,11 @@ class Metrics:
                 index = min(len(values) - 1, max(0, int(round((p / 100.0) * (len(values) - 1)))))
                 return values[index]
 
-            timings = {"request_p50_ms": percentile(50), "request_p95_ms": percentile(95)}
+            timings = {
+                "request_p50_ms": percentile(50),
+                "request_p95_ms": percentile(95),
+                "request_p99_ms": percentile(99),
+            }
         return counters, timings
 
 
