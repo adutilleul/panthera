@@ -84,6 +84,13 @@ Other options include:
 * `TESTS`: python test files
 * `LABELS`: test labels
 
+Tests that need optional tools or external services should skip themselves when
+those are unavailable and carry the `integration` label so `make unit-test`
+does not require them. The microbenchmark sidecar is an example: it registers
+`microbench_sidecar_python_test` only when `protoc` and `grpcio` are present,
+and its QEMU/`amperesys` cases skip unless the `PANTHERA_*` tool environment is
+set.
+
 ### Panthera (i.e. study-like)
 
 You can use the `add_panthera_test(...)` function in a `CMakeLists.txt` to add/register a cheetah test. For example:

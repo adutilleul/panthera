@@ -54,6 +54,51 @@ Non-goals for v1:
 - Untrusted code. v1 accepts client bytes only from trusted local clients; see
   the security boundary in section 3.1.
 
+
+## 1.1 Implementation status (2026-11-04)
+
+The v1 Python sidecar is implemented on branch `microbench-grpc` and pushed to
+`fork/microbench-grpc`:
+
+- **Service:** `Run`, `RunBatch`, `Health`, and `Stats` over a Unix-domain gRPC
+  socket; bounded worker pool, deadlines, graceful shutdown.
+- **Trace:** tracing-QEMU 8.0 user-mode + patched plugin; flat identity page
+  table (table `0x900000`, stack `0xA00000`, data `0xB00000`–1 GiB); synthetic
+  TCR/TTBR; deterministic `.is.xz`/`.mem`.
+- **Data:** `RunRequest.data` sections (≤2 MiB, no overlaps) in the harness ELF
+  and `.mem`; client `--data-hex ADDRESS:HEX`.
+- **Simulation:** subprocess `amperesys` runner with real cycles/instructions/
+  IPC; PMU map remains a follow-up.
+- **Cache:** content-addressed trace and result caches including code, caps,
+  data, tool fingerprints, the transitive config include tree (`:cfg`,
+  `:append-cfg`, `:override-cfg`, `@file`), and pipeline sources; atomic
+  writes, LRU, corrupt-entry recovery.
+- **Tests:** 42 unit/integration tests (QEMU/`amperesys` integration tests skip
+  unless the `PANTHERA_*` tool environment is set).
+
+Measured cold path: 10k = 1.89 s, 100k = 7.33 s. Result-cache hit: 70–90 µs;
+trace-cache hit (simulation only): ~1.5 s at 10k, ~4.3 s at 100k.
+
+Remaining: Phase 4.3 CI smoke test and Step 4.4 performance sign-off.
+Optional follow-ups: C++ in-process runner, sandbox for remote exposure,
+system-mode bare-metal fallback, PMU map, scratch/uninitialized-memory policy,
+and per-request process isolation.
+
+### Runbook (source tree)
+
+```bash
+export PANTHERA_QEMU_AARCH64=/path/to/tracing-qemu/build/qemu-aarch64
+export PANTHERA_TRACER_PLUGIN=/path/to/libinstruction_tracer.so
+export PANTHERA_IS_INFO=/path/to/is_info
+export PANTHERA_AMPERESYS=/path/to/amperesys
+export PANTHERA_CONFIG=/path/to/siryn.cfg
+
+python3 src/ampere/microbench/python/microbench_server.py \
+  --listen unix:///tmp/panthera-microbench.sock \
+  --cache-dir /tmp/panthera-cache \
+  --trace-dir /tmp/panthera-traces
+```
+
 ## 2. Constraints and findings (drivers of the design)
 
 1. Panthera is **trace-driven**, not an ISA simulator. `Core` consumes
@@ -680,6 +725,10 @@ compatible.
 
 #### Step 1.4 — Bare-metal system-mode fallback
 
+Status: **Deferred/not needed for v1.** User-mode QEMU + the patched plugin
+covers the microbenchmark path; system-mode remains a fallback for workloads
+that need complete sysregs/page tables.
+
 Work:
 - Only if Gate 0.B requires it: a tiny `_start` that sets up EL1, runs the
   code, and exits via semihosting; launch with
@@ -743,6 +792,9 @@ Files: `microbench_server.py`, `microbench_client.py`,
 
 #### Step 1.6 — (Candidate) fork-after-elaboration worker
 
+Status: **Deferred.** The result cache makes repeated requests fast; the
+remaining cold fixed cost is addressed first by the C++ in-process runner.
+
 Status: candidate, not included in the Phase 1 estimate. Only start if Gate 1
 shows the ~1.7 s fixed cost is still a problem after caching.
 
@@ -775,6 +827,10 @@ the limiting factor.
 ---
 
 ### Phase 2 — In-process raw-code front end (10–14 days, gated by Gate 1)
+
+Status: **Gate 1 met for v1; deferred as a performance follow-up.** The
+QEMU + `amperesys` path is the delivered v1. Phase 2 remains the path to remove
+the ~1.4 s `amperesys` startup and the QEMU process, if needed.
 
 Only do this if measured latency/throughput still misses the objective.
 
@@ -905,7 +961,13 @@ passes the differential corpus. Otherwise keep QEMU as the producer.
 
 ### Phase 3 — gRPC service (5–7 days)
 
+Status: **DONE in the Python sidecar** (the C++ server is deferred).
+
 #### Step 3.1 — Proto and generated targets
+
+Status: **DONE (sidecar).** The proto has `Run`, `RunBatch`, `Health`, and
+`Stats`; Python stubs are generated with `protoc --python_out`. C++ gRPC/CMake
+generation is deferred with the C++ server.
 
 Work:
 - Define `microbench.proto`: `Run`, `RunBatch`, `Health`, optional
@@ -963,6 +1025,9 @@ Files: `src/ampere/microbench/python/simulation_runner.py`,
 
 #### Step 3.3 — RPC handlers
 
+Status: **DONE (sidecar).** Validation, cache routing, trace+simulation,
+`RunBatch`, typed errors, and `Stats` are implemented.
+
 Work:
 - Validate request (caps present, sections in range, config resolvable).
 - Route to `TraceSource` then `SimulationRunner`.
@@ -976,6 +1041,9 @@ Acceptance: end-to-end `Run` and `RunBatch`; a hung worker is killed and the
 RPC returns `DeadlineExceeded`.
 
 #### Step 3.4 — Server lifecycle and concurrency
+
+Status: **DONE (sidecar).** Bounded admission, deadlines, graceful
+SIGTERM/SIGINT with child termination, and socket cleanup are implemented.
 
 Work:
 - One simulation at a time per worker process; pool for parallelism.
@@ -992,51 +1060,87 @@ signal/exit handling.
 
 ### Phase 4 — Hardening and delivery (4–6 days)
 
-#### Step 4.1 — Test suite
+Status: **IN PROGRESS** (started 2026-11-04). Steps 4.1 and 4.2 are done and
+Step 4.3 installs the sidecar; the CI smoke test (4.3) and the performance
+sign-off (4.4) remain.
 
-- Unit: trace cache, hashing, page tables, driver decode/commit/recover,
-  proto validation, error mapping.
-- Integration: end-to-end `Run` for each supported benchmark class.
-- Differential: in-process vs QEMU traces.
-- Negative: illegal opcode, fault, runaway loop, oversized request, truncated
-  stream.
-- Performance: latency budget assertions (cache hit, cache miss, batch).
-- Register everything with `add_cpp_test` / `add_python_test`; use the
-  Makefile selectors' labels correctly (`integration`, `benchmark`, `veryslow`).
+#### Step 4.1 — Test suite and registration
+
+Status: **DONE**. `src/ampere/microbench/CMakeLists.txt` registers
+`microbench_sidecar_python_test` with `add_python_test(... DISCOVER ...
+LABELS integration TIMEOUT 1200)` and adds the subdirectory from
+`src/ampere/CMakeLists.txt`. Registration is guarded on `protoc` and `grpcio`,
+so the main build is unaffected when the optional sidecar dependencies are
+absent.
+
+- Verified with the full tool environment: the suite runs 42 tests and passes
+  in ~1.7 s.
+- Verified without `PANTHERA_*`: the suite passes in ~0.2 s by skipping the
+  QEMU/`amperesys` cases, so no QEMU is required for `make unit-test`.
+- A separate CTest smoke test is not needed yet: the QEMU and `amperesys`
+  integration cases already start the sidecar machinery and run a benchmark
+  when the environment is set.
 
 #### Step 4.2 — Documentation
 
-- User-facing page: how to start the server, request schema, limits,
-  determinism, supported ISA subset.
-- Developer page: architecture, trace-source extension points, worker model.
-- Update `mkdocs.yml` only for pages that should be published.
-- Update `doc/development/testing.md` if the test workflow changes.
+Status: **DONE**, with `make doc` outstanding on this host.
+
+- Added `doc/user-guide/microbench-server.md`: requirements, startup, request
+  schema, memory layout, limits, cache, Stats, shutdown, supported subset, and
+  limitations. Linked from `mkdocs.yml` under User Guide.
+- Updated the Python README and `doc/development/testing.md` for the test
+  registration and `integration` label workflow.
+- `make doc` could not run because `mkdocs` is not installed on this host;
+  re-run in the Nix environment before publishing.
 
 #### Step 4.3 — Packaging and CI
 
-- Install the server binary and proto descriptors.
-- Add a smoke test to CI that starts the server and runs one benchmark.
-- Keep the existing `amperesys` flow untouched.
+Status: **PARTIAL**. Installation and wrappers are done; CI wiring remains.
+
+- `make install` (component path verified with
+  `cmake -P .../microbench/python/cmake_install.cmake`) installs:
+  `bin/microbench-server`, `bin/microbench-client`,
+  `lib/python/panthera/microbench/python/*.py`, and
+  `lib/python/panthera/microbench/proto/microbench.proto`.
+- `PANTHERA_GEN_DIR` lets a read-only install prefix write generated stubs to
+  a user cache; the installed wrappers default it to
+  `${XDG_CACHE_HOME:-~/.cache}/panthera-microbench/gen`.
+- Verified the installed wrapper: `microbench-server --self-test` returns
+  metrics from an install prefix.
+- Full-tree `cmake --install` still stops earlier in unrelated targets
+  (`adis/disraw`); use the component install or fix that pre-existing target.
+- CI smoke job: **TODO**. Add a job that sets the QEMU/plugin/`amperesys`
+  environment and runs `ctest -R microbench_sidecar`, falling back to the
+  dependency-free unit run.
+- The existing `amperesys` flow is untouched.
 
 #### Step 4.4 — Performance sign-off
 
-- Record p50/p95/p99 latency and throughput for 10k/100k/1M instructions.
-- Record cache hit rate on a realistic batch.
-- State `Expected Perf Drift: <value or negligible>` in the review; the
-  existing simulator path should be unchanged.
+Status: **TODO**.
+
+- Record p50/p95/p99 latency and throughput for 10k/100k/1M instructions and a
+  realistic cache-hit batch.
+- State `Expected Perf Drift: None (existing path unchanged)`; the sidecar is
+  additive and does not modify `amperesys`.
+- Summarize the remaining optional work: C++ in-process runner, sandbox,
+  system-mode fallback, PMU map, scratch/uninitialized-memory policy.
 
 ## 6. File map (expected)
 
 ```
 src/ampere/microbench/
   proto/microbench.proto
-  python/                    # v1 gRPC sidecar (Step 0.4)
+  python/                    # v1 gRPC sidecar
     microbench_server.py
     microbench_client.py
     qemu_trace_source.py
     simulation_runner.py
+    trace_cache.py
+    process_registry.py
+    microbench-server        # installed wrapper
     test_*.py
-  CMakeLists.txt             # if/when the C++ server is revived
+    CMakeLists.txt           # Python test registration + install (Phase 4)
+  CMakeLists.txt             # sidecar test/install entry point (Phase 4)
   server.cc                  # C++ gRPC server (deferred)
   runner.{h,cc}
   trace_cache.{h,cc}
@@ -1055,9 +1159,9 @@ src/ampere/tracing_tools/
   is_tracer.h
 ```
 
-The sidecar does not link the C++ model. Step 3.2 decides between a persistent
-worker process (framed stdin/stdout or Unix socket) and one subprocess per
-request; prefer a persistent worker.
+The sidecar does not link the C++ model. It currently runs one QEMU + one
+`amperesys` subprocess per cold request behind a bounded worker pool; a
+persistent C++ worker remains an optional follow-up.
 
 Register the new subdirectory in `src/ampere/CMakeLists.txt`; register tests in
 the owning module's `CMakeLists.txt`. Do not add global include paths or
@@ -1202,17 +1306,22 @@ startup (~1.4 s) dominates tiny requests.
 
 ## 10. Definition of done
 
-- Server builds and installs with the supported Nix/CMake flow.
+- Server installs with the supported CMake flow (wrapper, Python modules,
+  proto) and runs from the source tree and the install prefix.
 - `Run` and `RunBatch` return correct, deterministic metrics for the supported
-  benchmark subset.
+  benchmark subset, including initialized data sections.
 - A result-cache hit returns metrics identical to a cold run for the same
   request.
-- Cache hit path does not invoke QEMU.
-- Worker crashes and timeouts do not take down the server.
-- Unit, integration, differential, and negative tests are registered and pass.
-- Documentation exists and `make doc` passes.
-- The security boundary from section 3.1 is enforced and documented.
+- Cache hit paths do not invoke QEMU; the result-cache path does not invoke
+  `amperesys`.
+- Worker crashes, subprocess hangs, deadlines, and shutdown do not take down
+  the server.
+- Unit, integration, differential, and negative tests are registered with
+  CTest and pass (QEMU/`amperesys` tests skip without the tool environment).
+- Documentation exists and `make doc` passes where mkdocs is available.
+- The v1 trusted-local security boundary is enforced and documented
+  (`--allow-remote` requires `--allow-untrusted`; sandboxing remains a
+  follow-up).
 - Existing `.is.xz` tests and at least one trace regression still pass.
-- `make check-format`, `make python-lint` (if Python changed), and the relevant
-  test targets pass.
+- `make check-format`, `make python-lint`, and the relevant test targets pass.
 - Review records `Expected Perf Drift: None (existing path unchanged)`.

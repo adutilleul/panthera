@@ -115,13 +115,22 @@ removed and regenerated.
 python3 -m unittest -v test_qemu_trace_source test_simulation_runner test_trace_cache test_worker_pool
 ```
 
-The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,
-`PANTHERA_TRACER_PLUGIN`, and `PANTHERA_IS_INFO` are set.
+The QEMU/`amperesys` integration tests run only when
+`PANTHERA_QEMU_AARCH64`, `PANTHERA_TRACER_PLUGIN`, `PANTHERA_IS_INFO`,
+`PANTHERA_AMPERESYS`, and `PANTHERA_CONFIG` are set; otherwise they skip.
+
+CMake registers the same suite as `microbench_sidecar_python_test` (label
+`integration`) when `protoc` and `grpcio` are available:
+
+```sh
+ctest --test-dir cmake-build-release -R microbench_sidecar --output-on-failure
+```
 
 ## Not yet
 
 - No in-process simulation: the v1 runner starts a subprocess `amperesys` per
   request, so its ~1.4 s startup dominates very small benchmarks.
 - `RunBatch` is implemented server-side but has no client flag yet.
-- No sandbox, authentication, or per-request memory limits beyond the code
-  size cap; bind to a Unix socket or use `--allow-untrusted` deliberately.
+- No sandbox or authentication. Request limits are a 4 MiB code cap and a
+  2 MiB total data cap; bind to a Unix socket or use `--allow-untrusted`
+  deliberately.

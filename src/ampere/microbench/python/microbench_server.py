@@ -34,7 +34,7 @@ from trace_cache import ResultCache, TraceCache, config_fingerprint, file_finger
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "proto"
 PROTO = PROTO_DIR / "microbench.proto"
-GEN = HERE / "gen"
+GEN = Path(os.environ.get("PANTHERA_GEN_DIR", HERE / "gen"))
 
 DEFAULT_LISTEN = "unix:///tmp/panthera-microbench.sock"
 SERVICE = "ampere.microbench.Microbench"
@@ -143,7 +143,7 @@ def _submit(work):
 
 def ensure_generated():
     """Generate the message stubs if they are missing or stale."""
-    GEN.mkdir(exist_ok=True)
+    GEN.mkdir(parents=True, exist_ok=True)
     generated = GEN / "microbench_pb2.py"
     if not generated.exists() or generated.stat().st_mtime < PROTO.stat().st_mtime:
         subprocess.run(

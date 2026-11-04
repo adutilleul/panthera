@@ -13,6 +13,7 @@ nav:
     - user-guide/cheetah.md
     - user-guide/parameters.md
     - user-guide/kestrel.md
+    - user-guide/microbench-server.md
   - 'Analysis':
     - analysis/stream_tools.md
     - analysis/rollup.md

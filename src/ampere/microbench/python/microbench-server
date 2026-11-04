@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Ampere Computing. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Wrapper for the installed microbenchmark gRPC sidecar.
+set -euo pipefail
+
+prefix="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cache_base="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"
+export PANTHERA_GEN_DIR="${PANTHERA_GEN_DIR:-${cache_base}/panthera-microbench/gen}"
+
+exec "${PYTHON:-python3}" \
+    "${prefix}/lib/python/panthera/microbench/python/microbench_server.py" "$@"
