@@ -91,11 +91,13 @@ benchmarks. Cold-path totals measured here: 10k = 1.89 s, 100k = 7.33 s
 (trace + simulation).
 
 Results are cached under `--cache-dir` (default
-`~/.cache/panthera-microbench`) with a size cap (`--cache-size-mb`, default
-1024; `--no-cache` disables caching). The key covers the code, caps, trace
-options, tool fingerprints, and config contents. Responses report
+`$XDG_CACHE_HOME/panthera-microbench` or `~/.cache/panthera-microbench`) with a
+total size cap (`--cache-size-mb`, default 1024; `--no-cache` disables
+caching). The key covers the code, caps, trace options, tool fingerprints, the
+transitive config include tree, and the pipeline source files. Responses report
 `cache=miss|trace|result`; a result hit returns the original metrics in about
-90 µs with no QEMU or `amperesys`.
+70–90 µs with no QEMU or `amperesys`. Corrupt or incomplete entries are
+removed and regenerated.
 
 ## Tests
 

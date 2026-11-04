@@ -25,7 +25,7 @@ from pathlib import Path
 import grpc
 from qemu_trace_source import CODE_ENTRY, FLAT_TABLE_PA, QemuTraceSource, TraceError
 from simulation_runner import SimulationError, SimulationRunner
-from trace_cache import ResultCache, TraceCache, file_fingerprint
+from trace_cache import ResultCache, TraceCache, config_fingerprint, file_fingerprint
 
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "proto"
@@ -88,6 +88,12 @@ def _run_impl(request, timeout_s=None):
         raise ValueError(f"max_instructions exceeds {MAX_INSTRUCTIONS}")
 
     started = time.monotonic()
+    pipeline = [
+        file_fingerprint(Path(__file__)),
+        file_fingerprint(Path(__file__).parent / "qemu_trace_source.py"),
+        file_fingerprint(Path(__file__).parent / "simulation_runner.py"),
+        file_fingerprint(Path(__file__).parent / "trace_cache.py"),
+    ]
     trace_key = None
     result_key = None
     if _trace_cache is not None:
@@ -102,6 +108,7 @@ def _run_impl(request, timeout_s=None):
                 "is_info": file_fingerprint(_trace_source.is_info),
                 "code_entry": CODE_ENTRY,
                 "flat_table": FLAT_TABLE_PA,
+                "pipeline": pipeline,
             }
         )
     if _result_cache is not None and trace_key is not None and _simulation_runner is not None:
@@ -109,13 +116,17 @@ def _run_impl(request, timeout_s=None):
             {
                 "trace_key": trace_key,
                 "amperesys": file_fingerprint(_simulation_runner.amperesys),
-                "config": file_fingerprint(_simulation_runner.config, hash_contents=True),
+                "config": config_fingerprint(_simulation_runner.config),
+                "pipeline": pipeline,
             }
         )
 
     lookup_started = time.perf_counter_ns()
     if _result_cache is not None and result_key is not None:
-        cached_result = _result_cache.get(result_key)
+        try:
+            cached_result = _result_cache.get(result_key)
+        except (OSError, ValueError):
+            cached_result = None
         if cached_result is not None:
             return pb.RunResponse(
                 cycles=cached_result.cycles,
@@ -127,7 +138,10 @@ def _run_impl(request, timeout_s=None):
 
     trace = None
     if _trace_cache is not None and trace_key is not None:
-        trace = _trace_cache.get(trace_key)
+        try:
+            trace = _trace_cache.get(trace_key)
+        except (OSError, ValueError):
+            trace = None
     cache_state = "disabled" if _trace_cache is None else ("trace" if trace is not None else "miss")
     if trace is None:
         trace = _trace_source.run(
@@ -136,7 +150,10 @@ def _run_impl(request, timeout_s=None):
             timeout_s=timeout_s,
         )
         if _trace_cache is not None and trace_key is not None:
-            trace = _trace_cache.put(trace_key, trace)
+            try:
+                trace = _trace_cache.put(trace_key, trace)
+            except (OSError, ValueError):
+                pass
 
     simulation = None
     if _simulation_runner is not None:
@@ -280,7 +297,7 @@ def run_self_test(address, allow_remote=False, trace_source=None):
             ),
         )
         assert response.instructions == 1, response
-        assert "trace=" in response.log, response
+        assert "trace=" in response.log or "cache=result" in response.log, response
         assert health_check(address).status == "ok"
     finally:
         server.stop(0).wait()

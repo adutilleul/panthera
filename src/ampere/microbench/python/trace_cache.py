@@ -6,6 +6,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -40,6 +41,45 @@ def content_key(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+CFG_INCLUDE = re.compile(
+    r"^\s*(?:(?P<scope>[^\s:#]+):)?"
+    r"(?P<directive>cfg|append-cfg|override-cfg|:cfg|:append-cfg|:override-cfg)"
+    r"\s+(?P<file>[^\s#]+)"
+)
+
+
+def config_fingerprint(path: str | os.PathLike | None, seen: set[str] | None = None, depth: int = 0) -> dict:
+    """Hash a config and every file reachable through :cfg/:append-cfg/:override-cfg."""
+    if path is None:
+        return {"missing": True}
+    entry = Path(path)
+    if not entry.exists():
+        return {"path": str(entry), "missing": True}
+    if depth > 32:
+        return {"path": str(entry.resolve()), "error": "include depth"}
+    resolved = str(entry.resolve())
+    if seen is None:
+        seen = set()
+    if resolved in seen:
+        return {"path": resolved, "cycle": True}
+    seen.add(resolved)
+    digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+    includes = []
+    try:
+        lines = entry.read_text(errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        match = CFG_INCLUDE.match(line)
+        if not match:
+            continue
+        child = Path(match.group("file").strip("'\""))
+        if not child.is_absolute():
+            child = entry.parent / child
+        includes.append(config_fingerprint(child, seen, depth + 1))
+    return {"path": resolved, "sha256": digest, "includes": includes}
+
+
 def _entry_size(entry: Path) -> int:
     if entry.is_file():
         return entry.stat().st_size
@@ -49,16 +89,26 @@ def _entry_size(entry: Path) -> int:
 def _evict(root: Path, max_bytes: int | None, new_size: int = 0) -> None:
     if max_bytes is None:
         return
-    entries = [entry for entry in root.iterdir() if not entry.name.startswith(".")]
-    total = sum(_entry_size(entry) for entry in entries)
-    for entry in sorted(entries, key=lambda item: item.stat().st_mtime):
+    entries = []
+    for entry in root.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            entries.append((entry, entry.stat().st_mtime, _entry_size(entry)))
+        except OSError:
+            continue
+    total = sum(size for _, _, size in entries)
+    for entry, _, size in sorted(entries, key=lambda item: item[1]):
         if total + new_size <= max_bytes:
             break
-        total -= _entry_size(entry)
-        if entry.is_dir():
-            shutil.rmtree(entry, ignore_errors=True)
-        else:
-            entry.unlink(missing_ok=True)
+        total -= size
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError:
+            pass
 
 
 class ResultCache:
@@ -131,10 +181,19 @@ class TraceCache:
         meta_path = entry / "meta.json"
         trace_path = entry / "trace.is.xz"
         mem_path = entry / "trace.mem"
+        if not entry.exists():
+            return None
         if not (meta_path.exists() and trace_path.exists() and mem_path.exists()):
+            shutil.rmtree(entry, ignore_errors=True)
             return None
         try:
             meta = json.loads(meta_path.read_text())
+            if trace_path.stat().st_size == 0 or mem_path.stat().st_size == 0:
+                raise ValueError("empty trace artifact")
+            if "trace_size" in meta and trace_path.stat().st_size != int(meta["trace_size"]):
+                raise ValueError("trace size mismatch")
+            if "mem_size" in meta and mem_path.stat().st_size != int(meta["mem_size"]):
+                raise ValueError("mem size mismatch")
             result = TraceResult(
                 path=trace_path,
                 instructions=int(meta["instructions"]),
@@ -160,17 +219,19 @@ class TraceCache:
 
     def put(self, key: str, result: TraceResult) -> TraceResult:
         final = self.root / key
+        if result.mem_path is None:
+            raise ValueError("trace cache requires a .mem image")
         if final.exists():
             cached = self.get(key)
             if cached is not None:
                 return cached
+            shutil.rmtree(final, ignore_errors=True)
 
         tmp = self.root / f".tmp-{key}-{uuid.uuid4().hex}"
         tmp.mkdir()
         try:
             shutil.copy2(result.path, tmp / "trace.is.xz")
-            if result.mem_path is not None:
-                shutil.copy2(result.mem_path, tmp / "trace.mem")
+            shutil.copy2(result.mem_path, tmp / "trace.mem")
             meta = {
                 "schema": CACHE_SCHEMA,
                 "instructions": result.instructions,
@@ -181,6 +242,8 @@ class TraceCache:
                 "memory_events": result.memory_events,
                 "sysreg_events": result.sysreg_events,
                 "code_sha256": result.code_sha256,
+                "trace_size": (tmp / "trace.is.xz").stat().st_size,
+                "mem_size": (tmp / "trace.mem").stat().st_size,
                 "created_ns": time.time_ns(),
             }
             (tmp / "meta.json").write_text(json.dumps(meta, sort_keys=True))

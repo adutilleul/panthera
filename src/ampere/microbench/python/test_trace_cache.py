@@ -12,7 +12,7 @@ from unittest import mock
 import microbench_server
 from qemu_trace_source import TraceResult
 from simulation_runner import SimulationResult
-from trace_cache import ResultCache, TraceCache, file_fingerprint
+from trace_cache import ResultCache, TraceCache, config_fingerprint, file_fingerprint
 
 
 def make_trace(directory: Path, name: str, measurement: int = 1) -> TraceResult:
@@ -51,6 +51,25 @@ class KeyTest(unittest.TestCase):
             self.assertEqual(first["size"], 1)
             self.assertIn("sha256", first)
             self.assertTrue(file_fingerprint(None)["missing"])
+
+
+class ConfigFingerprintTest(unittest.TestCase):
+    def test_transitive_include_changes_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root.cfg"
+            child = Path(directory) / "child.cfg"
+            child.write_text("setting 1\n")
+            root.write_text(":cfg child.cfg\n")
+            first = config_fingerprint(root)
+            child.write_text("setting 2\n")
+            self.assertNotEqual(first, config_fingerprint(root))
+
+    def test_missing_include(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root.cfg"
+            root.write_text(":cfg missing.cfg\n")
+            fingerprint = config_fingerprint(root)
+            self.assertTrue(fingerprint["includes"][0]["missing"])
 
 
 class ResultCacheTest(unittest.TestCase):
@@ -109,6 +128,18 @@ class TraceCacheTest(unittest.TestCase):
             cached = cache.put(key, make_trace(source, "a"))
             (cached.path.parent / "meta.json").write_text("{not json")
             self.assertIsNone(cache.get(key))
+            self.assertTrue(cache.put(key, make_trace(source, "b")).path.exists())
+
+    def test_missing_file_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            cache = TraceCache(Path(directory) / "cache")
+            key = cache.key({"x": 1})
+            cached = cache.put(key, make_trace(source, "a"))
+            cached.mem_path.unlink()
+            self.assertIsNone(cache.get(key))
+            self.assertTrue(cache.put(key, make_trace(source, "b")).path.exists())
 
     def test_eviction(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -176,10 +207,37 @@ class ServerCacheTest(unittest.TestCase):
             self.assertEqual(runner.calls, 1)
             self.assertTrue(first.log.startswith("cache=miss"))
             self.assertTrue(second.log.startswith("cache=result"))
+            self.assertLess(second.wall_ns, 5_000_000)
             self.assertEqual(
                 (first.cycles, first.instructions, first.ipc),
                 (second.cycles, second.instructions, second.ipc),
             )
+
+    def test_trace_hit_still_simulates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            source = FakeTraceSource(source_dir)
+            runner = FakeRunner()
+            trace_cache = TraceCache(root / "cache" / "traces")
+            request = microbench_server.pb.RunRequest(
+                code=(0xD2800C80).to_bytes(4, "little"),
+                entry_pc=microbench_server.CODE_ENTRY,
+                max_instructions=1,
+            )
+            with (
+                mock.patch.object(microbench_server, "_trace_source", source),
+                mock.patch.object(microbench_server, "_simulation_runner", runner),
+                mock.patch.object(microbench_server, "_trace_cache", trace_cache),
+                mock.patch.object(microbench_server, "_result_cache", None),
+            ):
+                first = microbench_server._run_impl(request)
+                second = microbench_server._run_impl(request)
+            self.assertEqual(source.calls, 1)
+            self.assertEqual(runner.calls, 2)
+            self.assertTrue(first.log.startswith("cache=miss"))
+            self.assertTrue(second.log.startswith("cache=trace"))
 
 
 if __name__ == "__main__":

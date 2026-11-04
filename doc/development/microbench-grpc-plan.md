@@ -33,7 +33,7 @@ milliseconds" target was based on a wrong assumption about trace generation.
 | Metric | 10k instructions | 100k instructions | 1M instructions |
 |---|---:|---:|---:|
 | Result-cache hit p50 | ~90 µs (measured) | ~90 µs | ~90 µs |
-| Trace-cache hit, simulation only | ~1.5 s | ~4.3 s | — |
+| Trace-cache hit, simulation only | ~1.5 s | ~4.3 s (simple loop/siryn; workload-dependent) | — |
 | Cold request (QEMU + simulation), indicative | ~1.9 s | ~7.3 s | — |
 | Throughput per worker | ~0.5 req/s cold; >10k req/s cached | ~0.14 req/s cold | — |
 
@@ -539,22 +539,28 @@ behavior changed.
 #### Step 1.2 — Trace and result cache
 
 Status: **DONE (2026-11-04)** for the Python sidecar (v1). Result-cache hit:
-~90 µs (target <= 5 ms), with no QEMU and no simulation.
+~70–90 µs (target <= 5 ms), with no QEMU and no simulation.
 
 Result:
 - Keys: SHA-256 over the code hash/length, entry, `max_instructions`, the flat
   mapping constants, QEMU/plugin/`is_info` fingerprints (path/size/mtime), the
-  `amperesys` fingerprint and config **content** hash, plus a schema salt.
+  `amperesys` fingerprint, the **transitive config include tree** (`:cfg`,
+  `:append-cfg`, `:override-cfg` recursively hashed), and the pipeline Python
+  source fingerprints; both keys include a schema salt.
 - Trace cache: `<cache>/traces/<key>/{trace.is.xz,trace.mem,meta.json}`.
 - Result cache: `<cache>/results/<key>.json` with cycles/instructions/IPC/summary.
-- Atomic writes (temp + rename), LRU by mtime with a size cap (default 1 GiB),
-  corrupt entries removed and regenerated.
+- Atomic writes (temp + rename), LRU by mtime with a total size cap (default
+  1 GiB, split across both caches). Corrupt, empty, or missing-file entries are
+  removed and regenerated; cache read/write failures are non-fatal.
 - Server flags: `--cache-dir`, `--cache-size-mb`, `--no-cache`; responses log
   `cache=miss|trace|result`.
 - Concurrent identical misses may both compute; atomic rename makes the last
   writer win without corruption. Per-key stampede locking is a follow-up.
-- Tests: key stability/fingerprints, result/trace put-get, corrupt entries,
-  LRU, and a server test proving the second request is a result hit.
+- The self-test is idempotent: a repeat with the same cache returns a result
+  hit and still asserts the expected instruction count.
+- Tests (29 total): key stability/fingerprints, transitive config rekeying,
+  result/trace put-get, corrupt/missing-file recovery, LRU, a server result
+  hit, and a trace hit that still simulates.
 
 Work:
 - Content hash over code, data sections, entry, caps, the **resolved** config
@@ -575,7 +581,9 @@ invoking QEMU or simulation; a trace-cache hit skips QEMU but still simulates;
 corrupt/truncated entries are detected and regenerated; concurrent writers are
 safe.
 
-Files: new `src/ampere/microbench/trace_cache.{h,cc}` + tests.
+Files: `src/ampere/microbench/python/trace_cache.py`,
+`src/ampere/microbench/python/test_trace_cache.py`, and the sidecar server.
+The C++ `trace_cache.{h,cc}` is deferred with the C++ server.
 
 Subagent: review subagent focuses on hashing completeness, collision handling,
 and filesystem races.
