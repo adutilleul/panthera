@@ -633,7 +633,7 @@ Result:
 Limitations:
 - `max_instructions` is required; `max_cycles` alone is not supported.
 - `entry_pc` must be 0 or `0x400100`; the code base is fixed.
-- Data sections are rejected; `.data`/`.bss` support is a follow-up.
+- Data sections are supported through the Step 2.1 `.data` path.
 - `cycles`/`ipc` require the Step 3.2 runner; trace-only when it is disabled.
 - The trace includes a flat TCR/TTBR and `.mem`; `amperesys` consumes it
   (Step 2.1). Addresses outside the low 1 GiB fault deterministically.
@@ -717,7 +717,7 @@ Result:
   4 successes and 2 `RESOURCE_EXHAUSTED`; after completion `queued=0`,
   `finished=4`; SIGTERM exited 0.
 - Tests: worker-pool admission/result, cancellation/permit release, and
-  metrics/Stats tests; 36 total.
+  metrics/Stats, and data-section tests; 41 total.
 
 Scope: trace/simulation workers. The C++ server's process model remains
 Step 3.4; this is the sidecar implementation.
@@ -794,16 +794,22 @@ Result:
   and runs the trace: **1,000 instructions, 1,583 cycles, IPC 1.183**.
 - Determinism: the `.is.xz` and `.mem` are byte-identical across identical
   runs.
-- The mapping covers the code (`0x400000`–`0x400100`) and stack; addresses
-  outside the low 1 GiB fault deterministically.
+- `RunRequest.data` sections are placed in the harness ELF at their requested
+  VAs and written to `<trace>.mem` as memory records. Allowed range is
+  `0x700000`–1 GiB, total <= 2 MiB, no overlaps. The client exposes
+  `--data-hex ADDRESS:HEX`.
+- Verified with a load/add/store loop over data at `0x700000`: 174 cycles,
+  100 instructions, IPC 0.575; changing the data rekeys the cache.
+- The mapping covers the code (`0x400000`–`0x400100`), stack (`0x600000`) and
+  data (`0x700000`+); addresses outside the low 1 GiB fault deterministically.
 
 Work:
-- Build a sparse `ArchState` from request sections. **Deferred: the `.mem`
-  currently contains the page table only; data sections remain a follow-up.**
+- Build a sparse `ArchState` from request sections. **Done: the `.mem`
+  contains the page table plus request data records.**
 - Generate a flat mapping (1 GB blocks or 2 MB pages) covering code, data,
   stack, and a scratch arena. **Done for the low 1 GiB.**
-- Deterministic fill policy for uninitialized memory. **Page table is
-  zero-filled; user data/scratch sections remain.**
+- Deterministic fill policy for uninitialized memory. **Page table and stack
+  are zero-filled; request data is explicit.**
 - Optional MMU-off/identity fast path. **Not needed.**
 
 Acceptance: arbitrary benchmark addresses in the mapped range translate;

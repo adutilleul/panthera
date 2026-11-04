@@ -181,7 +181,7 @@ class FakeTraceSource:
         self.directory = directory
         self.calls = 0
 
-    def run(self, code, max_instructions, timeout_s=None):
+    def run(self, code, max_instructions, data_sections=(), timeout_s=None):
         self.calls += 1
         return make_trace(self.directory, f"trace{self.calls}", max_instructions)
 
@@ -230,6 +230,38 @@ class ServerCacheTest(unittest.TestCase):
                 (first.cycles, first.instructions, first.ipc),
                 (second.cycles, second.instructions, second.ipc),
             )
+
+    def test_data_changes_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            source = FakeTraceSource(source_dir)
+            runner = FakeRunner()
+            trace_cache = TraceCache(root / "cache" / "traces")
+            result_cache = ResultCache(root / "cache" / "results")
+            code = (0xD2800C80).to_bytes(4, "little")
+            base = dict(
+                code=code,
+                entry_pc=microbench_server.CODE_ENTRY,
+                max_instructions=1,
+            )
+            first_request = microbench_server.pb.RunRequest(
+                **base, data=[microbench_server.pb.Section(address=0x700000, data=b"a")]
+            )
+            second_request = microbench_server.pb.RunRequest(
+                **base, data=[microbench_server.pb.Section(address=0x700000, data=b"b")]
+            )
+            with (
+                mock.patch.object(microbench_server, "_trace_source", source),
+                mock.patch.object(microbench_server, "_simulation_runner", runner),
+                mock.patch.object(microbench_server, "_trace_cache", trace_cache),
+                mock.patch.object(microbench_server, "_result_cache", result_cache),
+            ):
+                microbench_server._run_impl(first_request)
+                microbench_server._run_impl(second_request)
+            self.assertEqual(source.calls, 2)
+            self.assertEqual(runner.calls, 2)
 
     def test_trace_hit_still_simulates(self):
         with tempfile.TemporaryDirectory() as directory:

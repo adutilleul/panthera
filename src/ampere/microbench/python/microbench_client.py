@@ -47,6 +47,12 @@ def main(argv=None):
     parser.add_argument("--code-hex", default="d2800c80", help="comma-separated 32-bit words")
     parser.add_argument("--entry-pc", type=lambda value: int(value, 0), default=0x400100)
     parser.add_argument("--max-instructions", type=int, default=1000)
+    parser.add_argument(
+        "--data-hex",
+        action="append",
+        default=[],
+        help="initialized data section as ADDRESS:HEXBYTES (repeatable)",
+    )
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--stats", action="store_true")
     args = parser.parse_args(argv)
@@ -65,11 +71,20 @@ def main(argv=None):
     except ValueError:
         parser.error(f"invalid --code-hex: {args.code_hex}")
 
+    sections = []
+    for item in args.data_hex:
+        try:
+            address, hex_data = item.split(":", 1)
+            sections.append(pb.Section(address=int(address, 0), data=bytes.fromhex(hex_data)))
+        except ValueError:
+            parser.error(f"invalid --data-hex: {item}")
+
     response = call(
         args.listen,
         pb.RunRequest(
             entry_pc=args.entry_pc,
             code=code,
+            data=sections,
             max_instructions=args.max_instructions,
         ),
     )

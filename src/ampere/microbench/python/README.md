@@ -80,7 +80,11 @@ produce byte-identical `.is.xz` and `.mem` files; flat traces omit
 process-specific sysregs and emit fixed synthetic TCR/TTBR.
 
 The source also writes `<trace>.mem`, a flat level-1 page table mapping VA
-0–1 GiB to PA 0–1 GiB. The trace and `.mem` are directly consumable by
+0–1 GiB to PA 0–1 GiB, plus any requested data sections. `RunRequest.data`
+sections are placed in the harness ELF at their requested VAs and written to
+the `.mem` image; addresses must be in `0x700000`–1 GiB, total data is capped
+at 2 MiB, and sections must not overlap. The client exposes
+`--data-hex ADDRESS:HEX`. The trace and `.mem` are directly consumable by
 `amperesys`:
 
 ```sh
@@ -118,7 +122,6 @@ The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,
 
 - No in-process simulation: the v1 runner starts a subprocess `amperesys` per
   request, so its ~1.4 s startup dominates very small benchmarks.
-- No data sections (`.data`/`.bss` at request-specified addresses).
 - `RunBatch` is implemented server-side but has no client flag yet.
 - No sandbox, authentication, or per-request memory limits beyond the code
   size cap; bind to a Unix socket or use `--allow-untrusted` deliberately.

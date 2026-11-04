@@ -13,11 +13,13 @@ from pathlib import Path
 from qemu_trace_source import (
     CODE_BASE,
     CODE_ENTRY,
+    DATA_BASE,
     FLAT_TABLE_PA,
     QemuTraceSource,
     TraceError,
     _harness_assembly,
     _parse_is_info,
+    validate_data_sections,
 )
 
 
@@ -66,6 +68,33 @@ class FlatPageTableTest(unittest.TestCase):
             self.assertEqual(struct.unpack("<Q", data[12:20])[0], 0x401)
 
 
+class DataSectionsTest(unittest.TestCase):
+    def test_validation(self):
+        with self.assertRaises(TraceError):
+            validate_data_sections([(DATA_BASE - 1, b"x")])
+        with self.assertRaises(TraceError):
+            validate_data_sections([(DATA_BASE, b"x"), (DATA_BASE, b"y")])
+        self.assertEqual(validate_data_sections([(DATA_BASE + 16, b"y"), (DATA_BASE, b"x")])[0][0], DATA_BASE)
+
+    def test_memory_image_includes_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "bench_0.is.xz"
+            trace.write_bytes(b"trace")
+            payload = (41).to_bytes(8, "little")
+            mem = QemuTraceSource._write_flat_page_table(trace, [(DATA_BASE, payload)])
+            data = mem.read_bytes()
+            record = 12 + 4096
+            address, size = struct.unpack("<QI", data[record : record + 12])
+            self.assertEqual(address, DATA_BASE)
+            self.assertEqual(size, 8)
+            self.assertEqual(data[record + 12 : record + 20], payload)
+
+    def test_harness_includes_data_section(self):
+        assembly = _harness_assembly((0xD2800C80).to_bytes(4, "little"), [Path("data.bin")])
+        self.assertIn('.section .data_0,"aw",@progbits', assembly)
+        self.assertIn('.incbin "data.bin"', assembly)
+
+
 class MissingToolsTest(unittest.TestCase):
     def test_missing_paths(self):
         with self.assertRaises(TraceError):
@@ -87,6 +116,17 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(result.code_sha256, hashlib.sha256(code).hexdigest())
         self.assertTrue(result.mem_path.exists())
         self.assertEqual(result.mem_path.stat().st_size, 12 + 4096)
+
+    def test_trace_with_data(self):
+        source = QemuTraceSource(timeout_s=60)
+        # movz x1, #0x70, lsl #16; loop: ldr x0,[x1]; add; str; b loop
+        words = [0xD2A00E01, 0xF9400020, 0x91000400, 0xF9000020, 0x17FFFFFD]
+        code = b"".join(word.to_bytes(4, "little") for word in words)
+        payload = (41).to_bytes(8, "little")
+        result = source.run(code, 100, data_sections=[(DATA_BASE, payload)], name="data")
+        self.assertGreaterEqual(result.measurement, 100)
+        self.assertGreater(result.memops, 0)
+        self.assertGreater(result.mem_path.stat().st_size, 12 + 4096)
 
 
 if __name__ == "__main__":

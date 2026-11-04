@@ -27,7 +27,7 @@ from pathlib import Path
 
 import grpc
 from process_registry import terminate_all
-from qemu_trace_source import CODE_ENTRY, FLAT_TABLE_PA, QemuTraceSource, TraceError
+from qemu_trace_source import CODE_ENTRY, FLAT_TABLE_PA, QemuTraceSource, TraceError, validate_data_sections
 from simulation_runner import SimulationError, SimulationRunner
 from trace_cache import ResultCache, TraceCache, config_fingerprint, file_fingerprint
 
@@ -169,8 +169,10 @@ def _run_impl(request, timeout_s=None):
         raise ValueError("code length must be a multiple of 4 bytes")
     if len(request.code) > MAX_CODE_BYTES:
         raise ValueError(f"code exceeds {MAX_CODE_BYTES} bytes")
-    if request.data:
-        raise ValueError("data sections are not supported yet")
+    try:
+        data_sections = validate_data_sections([(section.address, section.data) for section in request.data])
+    except TraceError as error:
+        raise ValueError(str(error)) from error
     if request.entry_pc not in (0, CODE_ENTRY):
         raise ValueError(f"entry_pc must be 0 or {CODE_ENTRY:#x}")
     if request.max_instructions == 0:
@@ -199,6 +201,14 @@ def _run_impl(request, timeout_s=None):
                 "is_info": file_fingerprint(_trace_source.is_info),
                 "code_entry": CODE_ENTRY,
                 "flat_table": FLAT_TABLE_PA,
+                "data": [
+                    {
+                        "address": address,
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                    for address, data in data_sections
+                ],
                 "pipeline": pipeline,
             }
         )
@@ -241,6 +251,7 @@ def _run_impl(request, timeout_s=None):
         trace = _trace_source.run(
             request.code,
             request.max_instructions,
+            data_sections=data_sections,
             timeout_s=timeout_s,
         )
         if _trace_cache is not None and trace_key is not None:
@@ -408,7 +419,13 @@ def serve(address, workers=4, allow_remote=False):
         elif path.exists():
             raise ValueError(f"{socket_path} exists and is not a socket")
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=workers),
+        options=[
+            ("grpc.max_receive_message_length", 8 * 1024 * 1024),
+            ("grpc.max_send_message_length", 8 * 1024 * 1024),
+        ],
+    )
     server.add_generic_rpc_handlers((_generic_handler(),))
     if server.add_insecure_port(address) == 0:
         raise RuntimeError(f"failed to bind {address}")

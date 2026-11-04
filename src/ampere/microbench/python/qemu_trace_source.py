@@ -27,6 +27,10 @@ from process_registry import register_child, unregister_child
 # below it and the code is followed by a self-loop.
 CODE_BASE = 0x400000
 CODE_ENTRY = 0x400100
+# Data sections live above the stack (0x600000) and inside the flat 1 GiB map.
+DATA_BASE = 0x700000
+DATA_LIMIT = 0x40000000
+MAX_DATA_BYTES = 2 * 1024 * 1024
 
 # Flat stage-1 mapping: 4 KiB granule, 39-bit VA, one level-1 1 GiB block at
 # VA/PA 0. These values must match the synthetic TCR/TTBR written by the
@@ -37,6 +41,24 @@ FLAT_TCR_EL1 = 25 | (2 << 32)  # T0SZ=25, IPS=2
 
 class TraceError(RuntimeError):
     pass
+
+
+def validate_data_sections(sections) -> list[tuple[int, bytes]]:
+    ordered = sorted(((int(address), bytes(data)) for address, data in sections), key=lambda item: item[0])
+    total = 0
+    previous_end = None
+    for address, data in ordered:
+        if not data:
+            raise TraceError("data section is empty")
+        if address < DATA_BASE or address + len(data) > DATA_LIMIT:
+            raise TraceError(f"data section at {address:#x} is outside [{DATA_BASE:#x}, {DATA_LIMIT:#x})")
+        if previous_end is not None and address < previous_end:
+            raise TraceError("data sections overlap")
+        previous_end = address + len(data)
+        total += len(data)
+    if total > MAX_DATA_BYTES:
+        raise TraceError(f"data sections exceed {MAX_DATA_BYTES} bytes")
+    return ordered
 
 
 @dataclass
@@ -64,7 +86,7 @@ class TraceResult:
         )
 
 
-def _harness_assembly(code: bytes) -> str:
+def _harness_assembly(code: bytes, data_paths: list[Path] = ()) -> str:
     if len(code) % 4 != 0:
         raise TraceError("code length must be a multiple of 4 bytes")
     words = [int.from_bytes(code[i : i + 4], "little") for i in range(0, len(code), 4)]
@@ -91,7 +113,25 @@ def _harness_assembly(code: bytes) -> str:
     # If the benchmark falls through, keep it in a safe self-loop rather than
     # executing whatever follows the text section.
     lines += ["    b .", ""]
-    lines += [".section .bss", ".align 16", "    .space 0x10000", "stack_top:", ""]
+    lines += ['.section .stack,"aw",@nobits', ".align 16", "    .space 0x10000", "stack_top:", ""]
+    for index, path in enumerate(data_paths):
+        lines += [f'.section .data_{index},"aw",@progbits', f'    .incbin "{path}"', ""]
+    return "\n".join(lines)
+
+
+def _linker_script(data_sections: list[tuple[int, bytes]]) -> str:
+    lines = [
+        "ENTRY(_start)",
+        "SECTIONS",
+        "{",
+        "  . = 0x400000;",
+        "  .text : { *(.text) }",
+        "  . = 0x600000;",
+        "  .stack (NOLOAD) : { *(.stack) }",
+    ]
+    for index, (address, _) in enumerate(data_sections):
+        lines += [f"  . = {address:#x};", f"  .data_{index} : {{ *(.data_{index}) }}"]
+    lines += ["}", ""]
     return "\n".join(lines)
 
 
@@ -142,19 +182,28 @@ class QemuTraceSource:
         if self.is_info is None or not self.is_info.exists():
             raise TraceError("is_info not found; pass --is-info or set PANTHERA_IS_INFO")
 
-    def build_harness(self, code: bytes, name: str = "bench") -> tuple[Path, Path]:
+    def build_harness(self, code: bytes, data_sections=(), name: str = "bench") -> tuple[Path, Path, list[Path]]:
+        ordered = validate_data_sections(data_sections)
         asm = self.workdir / f"{name}.S"
         elf = self.workdir / f"{name}.elf"
-        asm.write_text(_harness_assembly(code))
+        linker = self.workdir / f"{name}.ld"
+        data_paths = []
+        for index, (_, data) in enumerate(ordered):
+            path = self.workdir / f"{name}.data{index}.bin"
+            path.write_bytes(data)
+            data_paths.append(path)
+        asm.write_text(_harness_assembly(code, data_paths))
+        linker.write_text(_linker_script(ordered))
         cmd = [
             "aarch64-linux-gnu-gcc",
             "-nostdlib",
             "-static",
             "-no-pie",
             "-fno-pie",
-            "-Wl,-Ttext=0x400000",
             "-Wl,-e,_start",
             "-Wl,--build-id=none",
+            "-T",
+            str(linker),
             "-o",
             str(elf),
             str(asm),
@@ -165,7 +214,7 @@ class QemuTraceSource:
             raise TraceError(f"harness assembly failed: {error}") from error
         if result.returncode != 0:
             raise TraceError(f"harness assembly failed: {result.stderr.strip()}")
-        return asm, elf
+        return asm, elf, [linker, *data_paths]
 
     def _run_is_info(self, trace_path: Path) -> dict:
         last_error = ""
@@ -184,8 +233,9 @@ class QemuTraceSource:
         raise TraceError(f"is_info rejected the trace: {last_error[:300]}")
 
     @staticmethod
-    def _write_flat_page_table(trace_path: Path) -> Path:
-        """Write the `.mem` image for the synthetic flat mapping."""
+    def _write_flat_page_table(trace_path: Path, data_sections=()) -> Path:
+        """Write the flat page table plus initialized data sections."""
+        ordered = validate_data_sections(data_sections)
         mem_path = trace_path.with_name(trace_path.name.replace(".is.xz", ".mem"))
         # Level-1 block descriptor: valid, AF=1, output address 0 (identity).
         entry = 1 | (1 << 10)
@@ -193,12 +243,16 @@ class QemuTraceSource:
         with mem_path.open("wb") as stream:
             stream.write(struct.pack("<QI", FLAT_TABLE_PA, len(table)))
             stream.write(table)
+            for address, data in ordered:
+                stream.write(struct.pack("<QI", address, len(data)))
+                stream.write(data)
         return mem_path
 
     def run(
         self,
         code: bytes,
         max_instructions: int,
+        data_sections=(),
         name: str | None = None,
         timeout_s: float | None = None,
     ) -> TraceResult:
@@ -206,11 +260,12 @@ class QemuTraceSource:
             raise TraceError("code is empty")
         if max_instructions <= 0:
             raise TraceError("max_instructions must be positive")
+        data_sections = validate_data_sections(data_sections)
 
         started = time.perf_counter_ns()
         code_sha = hashlib.sha256(code).hexdigest()
         name = name or f"bench_{uuid.uuid4().hex}"
-        asm, elf = self.build_harness(code, name)
+        asm, elf, intermediates = self.build_harness(code, data_sections, name)
         trace_base = self.workdir / name
         trace_path = self.workdir / f"{name}_0.is.xz"
         tmp_path = self.workdir / f"{name}_0.is.xz.tmp"
@@ -227,7 +282,7 @@ class QemuTraceSource:
                 f"start-tracing-after-pc=0x{CODE_ENTRY:x}",
                 "start-tracing-after-pc-occurrences=1",
                 f"stop-tracing-after-measuring-instructions={max_instructions}",
-                "cooldown-instructions=100",
+                "cooldown-instructions=1000",
                 "allow-missing-sysregs=true",
                 "flat-map=true",
             ]
@@ -292,12 +347,12 @@ class QemuTraceSource:
         info = self._run_is_info(trace_path)
         if info["measurement"] < max_instructions:
             raise TraceError(f"incomplete trace: measurement={info['measurement']} < requested={max_instructions}")
-        mem_path = self._write_flat_page_table(trace_path)
+        mem_path = self._write_flat_page_table(trace_path, data_sections)
         generation_ns = time.perf_counter_ns() - started
 
         if not self.keep_intermediates:
-            asm.unlink(missing_ok=True)
-            elf.unlink(missing_ok=True)
+            for path in [asm, elf, *intermediates]:
+                path.unlink(missing_ok=True)
 
         return TraceResult(
             path=trace_path,
