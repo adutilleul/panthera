@@ -607,7 +607,7 @@ Limitations:
 - `max_instructions` is required; `max_cycles` alone is not supported.
 - `entry_pc` must be 0 or `0x400100`; the code base is fixed.
 - Data sections are rejected; `.data`/`.bss` support is a follow-up.
-- `cycles`/`ipc` are 0 until the Step 3.2 runner.
+- `cycles`/`ipc` require the Step 3.2 runner; trace-only when it is disabled.
 - The trace includes a flat TCR/TTBR and `.mem`; `amperesys` consumes it
   (Step 2.1). Addresses outside the low 1 GiB fault deterministically.
 - No sandbox: user-mode QEMU executes client code with host syscalls. The

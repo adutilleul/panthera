@@ -91,7 +91,7 @@ class SimulationRunner:
             "-max_time",
             "1s",
         ]
-        effective_timeout = min(self.timeout_s, timeout_s) if timeout_s else self.timeout_s
+        effective_timeout = min(self.timeout_s, timeout_s) if timeout_s is not None else self.timeout_s
         if effective_timeout <= 0:
             raise TimeoutError("deadline exceeded before simulation")
         started = time.perf_counter_ns()

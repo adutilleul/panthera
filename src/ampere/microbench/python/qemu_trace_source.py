@@ -241,7 +241,7 @@ class QemuTraceSource:
             str(elf),
         ]
 
-        effective_timeout = min(self.timeout_s, timeout_s) if timeout_s else self.timeout_s
+        effective_timeout = min(self.timeout_s, timeout_s) if timeout_s is not None else self.timeout_s
         deadline = time.monotonic() + effective_timeout
         process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finalized = False
