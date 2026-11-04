@@ -18,7 +18,7 @@ transport overhead is not material.
 - tracing-QEMU 8.0 `qemu-aarch64` with plugins (the Ampere fork)
 - `libinstruction_tracer.so` built against that QEMU
 - `aarch64-linux-gnu-gcc` for the harness
-- optional: `is_info` for trace metadata
+- `is_info` for trace validation and metadata
 
 Configure paths with environment variables or CLI flags:
 
@@ -28,7 +28,9 @@ export PANTHERA_TRACER_PLUGIN=/path/to/libinstruction_tracer.so
 export PANTHERA_IS_INFO=/path/to/is_info
 ```
 
-The corresponding flags are `--qemu`, `--plugin`, and `--is-info`.
+The corresponding flags are `--qemu`, `--plugin`, and `--is-info`. `is_info` is
+required: the trace source rejects a trace whose measurement count is below the
+requested `max_instructions`.
 
 ## Generate stubs
 
@@ -51,20 +53,33 @@ python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock \
 python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock --health
 ```
 
-By default only Unix-domain sockets are accepted; pass `--allow-remote` to bind
-TCP. Code is capped at 16 MiB and batches at 64 items. `max_instructions` is
-required for trace generation.
+By default only Unix-domain sockets are accepted; pass `--allow-remote
+--allow-untrusted` to bind TCP. User-mode QEMU executes client code with host
+syscalls, so remote exposure without a sandbox is explicitly opt-in. Code is
+capped at 4 MiB, batches at 64 items, `max_instructions` at 1,000,000, and
+concurrent traces at 4 (`--max-concurrent`). `max_instructions` is required
+for trace generation.
 
 The harness places the code at `0x400100` after a small `_start` prologue that
-zeroes the register file and exits after the code returns; a self-loop follows
-in case the benchmark falls through. The response returns the measured
-instruction count, wall time, and a `trace=...` summary. Memory/data sections
-are not supported yet.
+zeroes `x0`–`x29`, sets a fixed BSS stack, and exits after the code returns; a
+self-loop follows in case the benchmark falls through. The trace source waits
+for the tracer to remove `<trace>.tmp` (the finalization signal), then
+terminates QEMU and validates the trace with `is_info`. Identical code requests produce
+byte-identical `.is.xz` files; flat traces omit process-specific sysregs.
+
+## Tests
+
+```sh
+python3 -m unittest -v test_qemu_trace_source
+```
+
+The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,
+`PANTHERA_TRACER_PLUGIN`, and `PANTHERA_IS_INFO` are set.
 
 ## Not yet
 
 - No simulation: `cycles` and `ipc` are 0 until the runner is wired in.
 - No data sections (`.data`/`.bss` at request-specified addresses).
 - `RunBatch` is implemented server-side but has no client flag yet.
-- No authentication, sandboxing, or per-request memory limits beyond the code
-  size cap; bind to a Unix socket or loopback only.
+- No sandbox, authentication, or per-request memory limits beyond the code
+  size cap; bind to a Unix socket or use `--allow-untrusted` deliberately.

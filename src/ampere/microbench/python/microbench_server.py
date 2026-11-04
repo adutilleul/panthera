@@ -15,6 +15,7 @@ protocol and service shape are the same as the planned C++ server.
 import argparse
 import subprocess
 import sys
+import threading
 import time
 from concurrent import futures
 from pathlib import Path
@@ -29,10 +30,17 @@ GEN = HERE / "gen"
 
 DEFAULT_LISTEN = "unix:///tmp/panthera-microbench.sock"
 SERVICE = "ampere.microbench.Microbench"
-MAX_CODE_BYTES = 16 * 1024 * 1024
+MAX_CODE_BYTES = 4 * 1024 * 1024 - 4096
+MAX_INSTRUCTIONS = 1_000_000
 MAX_BATCH = 64
 
 _trace_source: QemuTraceSource | None = None
+_run_slots = threading.BoundedSemaphore(4)
+
+
+def _set_max_concurrent(limit: int):
+    global _run_slots
+    _run_slots = threading.BoundedSemaphore(limit)
 
 
 def ensure_generated():
@@ -54,7 +62,7 @@ def ensure_generated():
 pb = ensure_generated()
 
 
-def _run_impl(request):
+def _run_impl(request, timeout_s=None):
     if _trace_source is None:
         raise TraceError("trace source is not configured")
     if not request.code:
@@ -69,11 +77,13 @@ def _run_impl(request):
         raise ValueError(f"entry_pc must be 0 or {CODE_ENTRY:#x}")
     if request.max_instructions == 0:
         raise ValueError("max_instructions is required for trace generation")
+    if request.max_instructions > MAX_INSTRUCTIONS:
+        raise ValueError(f"max_instructions exceeds {MAX_INSTRUCTIONS}")
 
     result = _trace_source.run(
         request.code,
         request.max_instructions,
-        name=f"run_{time.time_ns()}",
+        timeout_s=timeout_s,
     )
     return pb.RunResponse(
         cycles=0,
@@ -85,23 +95,40 @@ def _run_impl(request):
 
 
 def run(request, context):
+    remaining = context.time_remaining()
+    if remaining is not None and remaining <= 0:
+        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
+    if not _run_slots.acquire(blocking=False):
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "too many concurrent traces")
     try:
-        return _run_impl(request)
+        return _run_impl(request, remaining)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
     except TraceError as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+    finally:
+        _run_slots.release()
 
 
 def run_batch(request, context):
     if len(request.requests) > MAX_BATCH:
         context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"batch size exceeds {MAX_BATCH}")
+    if not _run_slots.acquire(blocking=False):
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "too many concurrent traces")
     try:
-        return pb.RunBatchResponse(responses=[_run_impl(item) for item in request.requests])
+        responses = []
+        for item in request.requests:
+            remaining = context.time_remaining()
+            if remaining is not None and remaining <= 0:
+                context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
+            responses.append(_run_impl(item, remaining))
+        return pb.RunBatchResponse(responses=responses)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
     except TraceError as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+    finally:
+        _run_slots.release()
 
 
 def health(request, context):
@@ -187,12 +214,27 @@ def main(argv=None):
         action="store_true",
         help="allow a non-Unix listen address (default: Unix socket only)",
     )
+    parser.add_argument(
+        "--allow-untrusted",
+        action="store_true",
+        help="accept client code without a sandbox (required with --allow-remote)",
+    )
+    parser.add_argument("--max-concurrent", type=int, default=4)
     parser.add_argument("--qemu", default=None, help="path to tracing-QEMU qemu-aarch64")
     parser.add_argument("--plugin", default=None, help="path to libinstruction_tracer.so")
     parser.add_argument("--is-info", default=None, help="path to the is_info tool")
     parser.add_argument("--trace-dir", default=None, help="directory for generated traces")
     parser.add_argument("--trace-timeout", type=float, default=120.0)
+    parser.add_argument("--keep-intermediates", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.allow_remote and not args.allow_untrusted:
+        parser.error(
+            "--allow-remote requires --allow-untrusted; user-mode QEMU executes client code with host syscalls"
+        )
+    if args.max_concurrent < 1:
+        parser.error("--max-concurrent must be positive")
+    _set_max_concurrent(args.max_concurrent)
 
     try:
         trace_source = QemuTraceSource(
@@ -201,12 +243,13 @@ def main(argv=None):
             is_info=args.is_info,
             workdir=args.trace_dir,
             timeout_s=args.trace_timeout,
+            keep_intermediates=args.keep_intermediates,
         )
         if args.self_test:
             run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
             return 0
         _trace_source = trace_source
-        server = serve(args.listen, allow_remote=args.allow_remote)
+        server = serve(args.listen, allow_remote=args.allow_remote, workers=args.max_concurrent)
     except ValueError as error:
         parser.error(str(error))
     except TraceError as error:

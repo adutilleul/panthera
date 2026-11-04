@@ -9,11 +9,14 @@ with `libinstruction_tracer.so`, and returns the generated `.is.xz` plus its
 metadata. It does not run the simulator; that is the runner's job.
 """
 
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,11 +41,13 @@ class TraceResult:
     memory_events: int
     sysreg_events: int
     generation_ns: int
+    code_sha256: str
     log: str
 
     def summary(self) -> str:
         return (
-            f"trace={self.path} instructions={self.instructions} "
+            f"trace={self.path} code={self.code_sha256[:16]} "
+            f"instructions={self.instructions} "
             f"(measurement={self.measurement}, cooldown={self.cooldown}) "
             f"memops={self.memops} memory={self.memory_events} sysregs={self.sysreg_events}"
         )
@@ -103,12 +108,18 @@ class QemuTraceSource:
         is_info: str | os.PathLike | None = None,
         workdir: str | os.PathLike | None = None,
         timeout_s: float = 120.0,
+        keep_intermediates: bool = False,
     ):
-        self.qemu = Path(qemu or os.environ.get("PANTHERA_QEMU_AARCH64", "qemu-aarch64"))
+        qemu_name = str(qemu or os.environ.get("PANTHERA_QEMU_AARCH64", "qemu-aarch64"))
+        resolved_qemu = shutil.which(qemu_name) or (qemu_name if Path(qemu_name).exists() else None)
+        self.qemu = Path(resolved_qemu) if resolved_qemu else Path(qemu_name)
         self.plugin = Path(plugin or os.environ.get("PANTHERA_TRACER_PLUGIN", ""))
-        self.is_info = Path(is_info) if is_info else None
+
+        is_info_name = is_info or os.environ.get("PANTHERA_IS_INFO")
+        self.is_info = Path(is_info_name) if is_info_name else None
         self.workdir = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="panthera-trace-"))
         self.timeout_s = timeout_s
+        self.keep_intermediates = keep_intermediates
         self.workdir.mkdir(parents=True, exist_ok=True)
 
         for name, path in (("qemu", self.qemu), ("plugin", self.plugin)):
@@ -117,8 +128,10 @@ class QemuTraceSource:
                     f"{name} not found: {path!s}. Set PANTHERA_QEMU_AARCH64/"
                     "PANTHERA_TRACER_PLUGIN or pass --qemu/--plugin."
                 )
+        if self.is_info is None or not self.is_info.exists():
+            raise TraceError("is_info not found; pass --is-info or set PANTHERA_IS_INFO")
 
-    def build_harness(self, code: bytes, name: str = "bench") -> Path:
+    def build_harness(self, code: bytes, name: str = "bench") -> tuple[Path, Path]:
         asm = self.workdir / f"{name}.S"
         elf = self.workdir / f"{name}.elf"
         asm.write_text(_harness_assembly(code))
@@ -126,6 +139,8 @@ class QemuTraceSource:
             "aarch64-linux-gnu-gcc",
             "-nostdlib",
             "-static",
+            "-no-pie",
+            "-fno-pie",
             "-Wl,-Ttext=0x400000",
             "-Wl,-e,_start",
             "-Wl,--build-id=none",
@@ -133,22 +148,51 @@ class QemuTraceSource:
             str(elf),
             str(asm),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise TraceError(f"harness assembly failed: {error}") from error
         if result.returncode != 0:
             raise TraceError(f"harness assembly failed: {result.stderr.strip()}")
-        return elf
+        return asm, elf
 
-    def run(self, code: bytes, max_instructions: int, name: str = "bench") -> TraceResult:
+    def _run_is_info(self, trace_path: Path) -> dict:
+        last_error = ""
+        for _ in range(2):
+            try:
+                result = subprocess.run(
+                    [str(self.is_info), str(trace_path)], capture_output=True, text=True, timeout=60
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                last_error = str(error)
+                break
+            if result.returncode == 0:
+                return _parse_is_info(result.stdout + result.stderr)
+            last_error = (result.stderr or result.stdout).strip()
+            time.sleep(0.1)
+        raise TraceError(f"is_info rejected the trace: {last_error[:300]}")
+
+    def run(
+        self,
+        code: bytes,
+        max_instructions: int,
+        name: str | None = None,
+        timeout_s: float | None = None,
+    ) -> TraceResult:
         if not code:
             raise TraceError("code is empty")
-        if max_instructions == 0:
-            raise TraceError("max_instructions must be non-zero")
+        if max_instructions <= 0:
+            raise TraceError("max_instructions must be positive")
 
-        elf = self.build_harness(code, name)
+        started = time.perf_counter_ns()
+        code_sha = hashlib.sha256(code).hexdigest()
+        name = name or f"bench_{uuid.uuid4().hex}"
+        asm, elf = self.build_harness(code, name)
         trace_base = self.workdir / name
         trace_path = self.workdir / f"{name}_0.is.xz"
+        tmp_path = self.workdir / f"{name}_0.is.xz.tmp"
         log_path = self.workdir / f"{name}.plugin.log"
-        for stale in (trace_path, self.workdir / f"{name}_0.is.xz.tmp", log_path):
+        for stale in (trace_path, tmp_path, log_path):
             stale.unlink(missing_ok=True)
 
         plugin_options = ",".join(
@@ -176,17 +220,24 @@ class QemuTraceSource:
             str(elf),
         ]
 
-        started = time.perf_counter_ns()
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        deadline = time.monotonic() + self.timeout_s
+        effective_timeout = min(self.timeout_s, timeout_s) if timeout_s else self.timeout_s
+        deadline = time.monotonic() + effective_timeout
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finalized = False
         while time.monotonic() < deadline:
-            if trace_path.exists() and trace_path.stat().st_size > 0:
-                # Give the writer a moment to finish the final rename/flush.
-                time.sleep(0.05)
+            # The tracer removes <trace>.tmp only after the final stream has
+            # been copied and finalized, so its absence is the completion
+            # signal. The "Stopping tracing" log line is printed before that
+            # copy and is not sufficient for large traces.
+            if trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
+                finalized = True
                 break
             if process.poll() is not None:
                 break
             time.sleep(0.02)
+
+        if not finalized and trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
+            finalized = True
 
         if process.poll() is None:
             process.terminate()
@@ -195,35 +246,34 @@ class QemuTraceSource:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        _, stderr = process.communicate()
+        log = log_path.read_text(errors="replace") if log_path.exists() else ""
+
+        if not finalized:
+            raise TraceError(
+                f"QEMU trace did not finalize within {effective_timeout:.1f}s "
+                f"(tmp_present={tmp_path.exists()}, log={log.strip()[-300:]})"
+            )
+        if not trace_path.exists() or trace_path.stat().st_size == 0:
+            raise TraceError(f"QEMU produced no trace within {effective_timeout:.1f}s (log={log.strip()[-300:]})")
+        info = self._run_is_info(trace_path)
+        if info["measurement"] < max_instructions:
+            raise TraceError(f"incomplete trace: measurement={info['measurement']} < requested={max_instructions}")
         generation_ns = time.perf_counter_ns() - started
 
-        if not trace_path.exists() or trace_path.stat().st_size == 0:
-            log = log_path.read_text(errors="replace") if log_path.exists() else ""
-            raise TraceError(
-                "QEMU produced no trace. "
-                f"exit={process.returncode} stderr={stderr.strip()[:300]} "
-                f"log={log.strip()[-300:]}"
-            )
+        if not self.keep_intermediates:
+            asm.unlink(missing_ok=True)
+            elf.unlink(missing_ok=True)
 
-        info = {}
-        if self.is_info and self.is_info.exists():
-            info_result = subprocess.run(
-                [str(self.is_info), str(trace_path)], capture_output=True, text=True, timeout=60
-            )
-            if info_result.returncode == 0:
-                info = _parse_is_info(info_result.stdout + info_result.stderr)
-
-        log = log_path.read_text(errors="replace") if log_path.exists() else ""
         return TraceResult(
             path=trace_path,
-            instructions=info.get("instructions", 0),
-            warmup=info.get("warmup", 0),
-            measurement=info.get("measurement", 0),
-            cooldown=info.get("cooldown", 0),
-            memops=info.get("memops", 0),
-            memory_events=info.get("memory_events", 0),
-            sysreg_events=info.get("sysreg_events", 0),
+            instructions=info["instructions"],
+            warmup=info["warmup"],
+            measurement=info["measurement"],
+            cooldown=info["cooldown"],
+            memops=info["memops"],
+            memory_events=info["memory_events"],
+            sysreg_events=info["sysreg_events"],
             generation_ns=generation_ns,
+            code_sha256=code_sha,
             log=log,
         )

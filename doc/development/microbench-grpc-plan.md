@@ -580,21 +580,29 @@ Result:
   `stop-tracing-after-measuring-instructions=N`, `cooldown-instructions=100`,
   `max-traces=1`, `allow-missing-sysregs=true,flat-map=true`.
 - The source monitors the output and terminates QEMU once the trace is
-  finalized; `max-traces=1` stops tracing but does not exit a self-looping
-  harness by itself.
+  finalized. The tracer removes `<trace>.tmp` after the final stream is
+  complete; `max-traces=1` stops tracing but the source terminates a
+  self-looping QEMU itself.
 - Determinism: two identical runs produce byte-identical `.is.xz` (SHA-256
   verified). Flat traces omit sysreg writes because user-mode TPIDR*/timer
   values are process-specific; the trace has 0 sysreg events.
-- Latency (3 reps; includes harness assembly + QEMU startup):
+- Completion is detected by the tracer removing `<trace>.tmp` after the final
+  stream is copied and finalized, then validated with `is_info`; the
+  `Stopping tracing` log line alone is printed too early. A truncated or short
+  trace is rejected instead of returned as success.
+- Latency (3 reps; includes harness assembly, QEMU startup, trace
+  finalization, and `is_info` validation):
 
   | Instructions | Median | Min | Max |
   |---:|---:|---:|---:|
-  | 10k | 0.397 s | 0.396 s | 0.399 s |
-  | 100k | 3.341 s | 3.258 s | 3.558 s |
-  | 1k (self-test) | 0.094 s | — | — |
+  | 10k | 0.373 s | 0.352 s | 0.428 s |
+  | 100k | 2.996 s | 2.994 s | 3.016 s |
+  | 1 instruction (self-test) | 0.077 s | — | — |
 
   For comparison, simulation alone is ~1.15 s at 10k and ~8–10 s at 100k, so
-  trace generation is not the dominant cold-path cost at these sizes.
+  trace generation is not the dominant cold-path cost at these sizes. The
+  numbers include harness assembly, QEMU startup, trace finalization, and
+  `is_info` validation.
 
 Limitations:
 - `max_instructions` is required; `max_cycles` alone is not supported.
@@ -603,6 +611,20 @@ Limitations:
 - `cycles`/`ipc` are 0 until the Step 3.2 runner.
 - The trace has flat PAs but no TCR/TTBR/page tables; `amperesys` still needs
   the Step 2.1 flat mapping.
+- No sandbox: user-mode QEMU executes client code with host syscalls. The
+  sidecar binds a Unix socket by default; `--allow-remote` additionally
+  requires `--allow-untrusted`.
+
+Hardening:
+- Code is capped at 4 MiB (gRPC's receive limit), `max_instructions` at 1M,
+  and concurrent traces at 4 (`--max-concurrent`); excess requests get
+  `RESOURCE_EXHAUSTED` rather than queueing.
+- `is_info` is required for validation and metadata; `PANTHERA_IS_INFO` is
+  honored.
+- Tests: `test_qemu_trace_source.py` covers harness generation, metadata
+  parsing, and missing-tool errors; the QEMU integration test runs when
+  `PANTHERA_QEMU_AARCH64`, `PANTHERA_TRACER_PLUGIN`, and `PANTHERA_IS_INFO` are
+  set.
 
 Work:
 - Wrap the benchmark bytes in a statically linked bare-metal ELF (or a small
@@ -622,7 +644,9 @@ remain a follow-up.**
 Files: `src/ampere/microbench/python/qemu_trace_source.py`,
 `src/ampere/microbench/python/microbench_server.py`,
 `src/ampere/microbench/python/microbench_client.py`,
-`src/ampere/microbench/python/README.md`.
+`src/ampere/microbench/python/test_qemu_trace_source.py`,
+`src/ampere/microbench/python/README.md`, and
+`src/ampere/tracing_tools/is_tracer.h` (flat sysreg omission).
 
 Subagent: review subagent checks process hygiene (no zombies, no leaked fds),
 timeout handling, determinism, and that plugin changes are backward
