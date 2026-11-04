@@ -52,7 +52,7 @@ python3 microbench_server.py --self-test --trace-dir /tmp/panthera-traces
 
 ```sh
 python3 microbench_server.py --listen unix:///tmp/panthera-microbench.sock \
-    --trace-dir /tmp/panthera-traces
+    --trace-dir /tmp/panthera-traces --cache-dir /tmp/panthera-cache
 python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock \
     --code-hex d2800c80,d2800001,91000421,f1000400 --max-instructions 1000
 python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock --health
@@ -90,10 +90,17 @@ returns the trace metadata with `cycles=0`. The runner starts a fresh
 benchmarks. Cold-path totals measured here: 10k = 1.89 s, 100k = 7.33 s
 (trace + simulation).
 
+Results are cached under `--cache-dir` (default
+`~/.cache/panthera-microbench`) with a size cap (`--cache-size-mb`, default
+1024; `--no-cache` disables caching). The key covers the code, caps, trace
+options, tool fingerprints, and config contents. Responses report
+`cache=miss|trace|result`; a result hit returns the original metrics in about
+90 µs with no QEMU or `amperesys`.
+
 ## Tests
 
 ```sh
-python3 -m unittest -v test_qemu_trace_source test_simulation_runner
+python3 -m unittest -v test_qemu_trace_source test_simulation_runner test_trace_cache
 ```
 
 The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,

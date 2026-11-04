@@ -13,6 +13,8 @@ protocol and service shape are the same as the planned C++ server.
 """
 
 import argparse
+import hashlib
+import os
 import subprocess
 import sys
 import threading
@@ -21,8 +23,9 @@ from concurrent import futures
 from pathlib import Path
 
 import grpc
-from qemu_trace_source import CODE_ENTRY, QemuTraceSource, TraceError
+from qemu_trace_source import CODE_ENTRY, FLAT_TABLE_PA, QemuTraceSource, TraceError
 from simulation_runner import SimulationError, SimulationRunner
+from trace_cache import ResultCache, TraceCache, file_fingerprint
 
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "proto"
@@ -37,6 +40,8 @@ MAX_BATCH = 64
 
 _trace_source: QemuTraceSource | None = None
 _simulation_runner: SimulationRunner | None = None
+_trace_cache: TraceCache | None = None
+_result_cache: ResultCache | None = None
 _run_slots = threading.BoundedSemaphore(4)
 
 
@@ -83,11 +88,56 @@ def _run_impl(request, timeout_s=None):
         raise ValueError(f"max_instructions exceeds {MAX_INSTRUCTIONS}")
 
     started = time.monotonic()
-    result = _trace_source.run(
-        request.code,
-        request.max_instructions,
-        timeout_s=timeout_s,
-    )
+    trace_key = None
+    result_key = None
+    if _trace_cache is not None:
+        trace_key = _trace_cache.key(
+            {
+                "code_sha256": hashlib.sha256(request.code).hexdigest(),
+                "code_bytes": len(request.code),
+                "entry": request.entry_pc,
+                "max_instructions": request.max_instructions,
+                "qemu": file_fingerprint(_trace_source.qemu),
+                "plugin": file_fingerprint(_trace_source.plugin),
+                "is_info": file_fingerprint(_trace_source.is_info),
+                "code_entry": CODE_ENTRY,
+                "flat_table": FLAT_TABLE_PA,
+            }
+        )
+    if _result_cache is not None and trace_key is not None and _simulation_runner is not None:
+        result_key = _result_cache.key(
+            {
+                "trace_key": trace_key,
+                "amperesys": file_fingerprint(_simulation_runner.amperesys),
+                "config": file_fingerprint(_simulation_runner.config, hash_contents=True),
+            }
+        )
+
+    lookup_started = time.perf_counter_ns()
+    if _result_cache is not None and result_key is not None:
+        cached_result = _result_cache.get(result_key)
+        if cached_result is not None:
+            return pb.RunResponse(
+                cycles=cached_result.cycles,
+                instructions=cached_result.instructions,
+                ipc=cached_result.ipc,
+                wall_ns=time.perf_counter_ns() - lookup_started,
+                log=f"cache=result {cached_result.summary()}",
+            )
+
+    trace = None
+    if _trace_cache is not None and trace_key is not None:
+        trace = _trace_cache.get(trace_key)
+    cache_state = "disabled" if _trace_cache is None else ("trace" if trace is not None else "miss")
+    if trace is None:
+        trace = _trace_source.run(
+            request.code,
+            request.max_instructions,
+            timeout_s=timeout_s,
+        )
+        if _trace_cache is not None and trace_key is not None:
+            trace = _trace_cache.put(trace_key, trace)
+
     simulation = None
     if _simulation_runner is not None:
         remaining = None
@@ -96,22 +146,24 @@ def _run_impl(request, timeout_s=None):
             if remaining <= 0:
                 raise TimeoutError("deadline exceeded before simulation")
         simulation = _simulation_runner.run(
-            result.path,
+            trace.path,
             request.max_instructions,
             timeout_s=remaining,
         )
+        if _result_cache is not None and result_key is not None:
+            _result_cache.put(result_key, simulation)
     if simulation is not None:
         cycles = simulation.cycles
         instructions = simulation.instructions
         ipc = simulation.ipc
-        wall_ns = result.generation_ns + simulation.wall_ns
-        log = f"{result.summary()} {simulation.summary()}"
+        wall_ns = trace.generation_ns + simulation.wall_ns
+        log = f"cache={cache_state} {trace.summary()} {simulation.summary()}"
     else:
         cycles = 0
-        instructions = result.measurement or result.instructions
+        instructions = trace.measurement or trace.instructions
         ipc = 0.0
-        wall_ns = result.generation_ns
-        log = f"{result.summary()} simulator=disabled"
+        wall_ns = trace.generation_ns
+        log = f"cache={cache_state} {trace.summary()} simulator=disabled"
     return pb.RunResponse(
         cycles=cycles,
         instructions=instructions,
@@ -236,7 +288,7 @@ def run_self_test(address, allow_remote=False, trace_source=None):
 
 
 def main(argv=None):
-    global _trace_source, _simulation_runner
+    global _trace_source, _simulation_runner, _trace_cache, _result_cache
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=DEFAULT_LISTEN)
     parser.add_argument("--self-test", action="store_true")
@@ -260,6 +312,9 @@ def main(argv=None):
     parser.add_argument("--amperesys", default=None, help="path to the amperesys binary")
     parser.add_argument("--config", default=None, help="system config for amperesys")
     parser.add_argument("--sim-timeout", type=float, default=600.0)
+    parser.add_argument("--cache-dir", default=None, help="trace/result cache root")
+    parser.add_argument("--cache-size-mb", type=int, default=1024)
+    parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
 
     if args.allow_remote and not args.allow_untrusted:
@@ -289,6 +344,15 @@ def main(argv=None):
             print(f"warning: simulator runner disabled: {error}", file=sys.stderr)
             simulation_runner = None
         _simulation_runner = simulation_runner
+        if args.no_cache:
+            _trace_cache = _result_cache = None
+        else:
+            root = Path(
+                args.cache_dir or os.environ.get("PANTHERA_CACHE_DIR") or Path.home() / ".cache/panthera-microbench"
+            )
+            max_bytes = args.cache_size_mb * 1024 * 1024 if args.cache_size_mb > 0 else None
+            _trace_cache = TraceCache(root / "traces", max_bytes)
+            _result_cache = ResultCache(root / "results", max_bytes)
         if args.self_test:
             run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
             return 0

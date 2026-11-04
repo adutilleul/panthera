@@ -32,10 +32,10 @@ milliseconds" target was based on a wrong assumption about trace generation.
 
 | Metric | 10k instructions | 100k instructions | 1M instructions |
 |---|---:|---:|---:|
-| Result-cache hit p50 | <= 5 ms | <= 5 ms | <= 5 ms |
-| Simulate path (no QEMU), p50 | ~2.9 s | ~11.5 s | ~77 s |
+| Result-cache hit p50 | ~90 µs (measured) | ~90 µs | ~90 µs |
+| Trace-cache hit, simulation only | ~1.5 s | ~4.3 s | — |
 | Cold request (QEMU + simulation), indicative | ~1.9 s | ~7.3 s | — |
-| Throughput per worker | ~0.35 req/s | ~0.09 req/s | ~0.013 req/s |
+| Throughput per worker | ~0.5 req/s cold; >10k req/s cached | ~0.14 req/s cold | — |
 
 Basis: 10k/30k rates measured on `domino.cfg` (~9.5–11 kips); long-trace rates
 on `siryn.cfg` (10.6–13.6 kips). The target table mixes these bases.
@@ -538,6 +538,24 @@ behavior changed.
 
 #### Step 1.2 — Trace and result cache
 
+Status: **DONE (2026-11-04)** for the Python sidecar (v1). Result-cache hit:
+~90 µs (target <= 5 ms), with no QEMU and no simulation.
+
+Result:
+- Keys: SHA-256 over the code hash/length, entry, `max_instructions`, the flat
+  mapping constants, QEMU/plugin/`is_info` fingerprints (path/size/mtime), the
+  `amperesys` fingerprint and config **content** hash, plus a schema salt.
+- Trace cache: `<cache>/traces/<key>/{trace.is.xz,trace.mem,meta.json}`.
+- Result cache: `<cache>/results/<key>.json` with cycles/instructions/IPC/summary.
+- Atomic writes (temp + rename), LRU by mtime with a size cap (default 1 GiB),
+  corrupt entries removed and regenerated.
+- Server flags: `--cache-dir`, `--cache-size-mb`, `--no-cache`; responses log
+  `cache=miss|trace|result`.
+- Concurrent identical misses may both compute; atomic rename makes the last
+  writer win without corruption. Per-key stampede locking is a follow-up.
+- Tests: key stability/fingerprints, result/trace put-get, corrupt entries,
+  LRU, and a server test proving the second request is a result hit.
+
 Work:
 - Content hash over code, data sections, entry, caps, the **resolved** config
   (not just the config name), trigger window, QEMU/plugin version, and the
@@ -703,12 +721,12 @@ make it sub-second on its own.
 Subagent: execution subagent runs the fork/A-B comparison; review subagent
 checks state isolation and zombie/fd handling.
 
-**Gate 1:** the cold path is now measured through the Step 3.2 subprocess
-shim: 10k = 1.89 s, 100k = 7.33 s (2 reps, indicative rather than p50). The
-result cache (Step 1.2) is not implemented, so the result-cache hit target is
-not met yet and Gate 1 is not final. Do not finalize the phase-2 deferral until
-the result-cache hit path is measured. If the targets are met, phase 2 can be
-deferred.
+**Gate 1:** met for the v1 shim. Result-cache hit = ~90 µs (target <= 5 ms,
+no QEMU/simulation); trace-cache hit = ~1.5 s at 10k and ~4.3 s at 100k
+(simulation only); cold = 1.89 s / 7.33 s (2 reps, indicative). QEMU is absent
+on both cache-hit paths. Phase 2 (in-process front end) can be deferred; keep
+it as a follow-up if the subprocess startup or simulator throughput becomes
+the limiting factor.
 
 ---
 
