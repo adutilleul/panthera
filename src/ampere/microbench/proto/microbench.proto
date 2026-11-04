@@ -1,0 +1,52 @@
+// Copyright (c) 2026 Ampere Computing. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+
+syntax = "proto3";
+
+package ampere.microbench;
+
+message Section {
+  uint64 address = 1;
+  bytes data = 2;
+}
+
+message RunRequest {
+  string config = 1;
+  uint64 entry_pc = 2;
+  bytes code = 3;
+  repeated Section data = 4;
+  uint64 max_instructions = 5;
+  uint64 max_cycles = 6;
+  uint64 warmup_instructions = 7;
+  map<string, string> params = 8;
+}
+
+message RunResponse {
+  uint64 cycles = 1;
+  uint64 instructions = 2;
+  double ipc = 3;
+  uint64 wall_ns = 4;
+  map<string, uint64> pmu = 5;
+  string log = 6;
+}
+
+message RunBatchRequest {
+  repeated RunRequest requests = 1;
+}
+
+message RunBatchResponse {
+  repeated RunResponse responses = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+service Microbench {
+  rpc Run(RunRequest) returns (RunResponse);
+  rpc RunBatch(RunBatchRequest) returns (RunBatchResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

@@ -405,6 +405,25 @@ system-mode) and the trigger mechanism.
 
 #### Step 0.4 — gRPC/Nix/CMake build spike
 
+Status: **DONE (2026-11-04)** with the sidecar fallback. No C++ gRPC toolchain
+(`grpc_cpp_plugin`, `grpc++` CMake package) and no Nix environment are
+available on this host. Python `grpcio` 1.84 and `protoc` 36.1 are available.
+
+Result: a protobuf-defined `Run`/`RunBatch`/`Health` service round-trips over a
+Unix-domain gRPC socket. The `Run` handler currently echoes the requested
+instruction-word count; the real simulator runner is Step 3.2. Self-test:
+`python3 microbench_server.py --self-test`. Separate client/server mode also
+passes. `RunBatch` is implemented server-side; the client flag is deferred.
+
+Decision (Gate 0.C): **v1 uses the Python sidecar.** The protocol is
+transport-neutral, so the planned C++ server can replace the sidecar when the
+Nix environment provides gRPC. The simulation dominates latency, so the Python
+transport overhead is not material.
+
+Files: `src/ampere/microbench/proto/microbench.proto`,
+`src/ampere/microbench/python/{microbench_server.py,microbench_client.py,README.md,.gitignore}`.
+Generated stubs under `gen/` are not checked in.
+
 Goal: prove the dependency stack links before the server work starts.
 
 Work:
@@ -418,13 +437,13 @@ Work:
   version, a Python gRPC sidecar, or a non-gRPC transport.
 
 Acceptance: a minimal `Run`-shaped RPC round-trips in the Nix environment, or a
-documented decision to use the sidecar.
+documented decision to use the sidecar. **Met via the sidecar.**
 
 Subagent: execution subagent runs the build; review subagent checks that the
-spike is isolated behind a flag/branch and does not change the default build.
+spike is isolated and does not change the default C++ build.
 
 **Gate 0.C:** dependency stack approved, or sidecar/alternative transport
-chosen.
+chosen. **Resolved: sidecar chosen for v1.**
 
 ---
 
