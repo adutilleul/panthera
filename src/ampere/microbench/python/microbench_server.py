@@ -123,11 +123,22 @@ def _submit(work):
             _admission.release()
 
     try:
-        return _executor.submit(job)
+        future = _executor.submit(job)
     except Exception:
         _metrics.dec("queued")
         _admission.release()
         raise
+
+    def release_cancelled(done):
+        # A Future cancelled before it starts never runs job(), so its
+        # admission permit and queued accounting must be released here.
+        if done.cancelled():
+            _metrics.dec("queued")
+            _metrics.inc("cancelled")
+            _admission.release()
+
+    future.add_done_callback(release_cancelled)
+    return future
 
 
 def ensure_generated():
@@ -528,10 +539,12 @@ def main(argv=None):
         # QEMU/amperesys children, then wait at most shutdown-grace for the
         # worker threads to unwind.
         server.stop(grace=0)
+        terminate_started = time.monotonic()
         terminate_all(min(2.0, args.shutdown_grace))
         if _executor is not None:
             _executor.shutdown(wait=False, cancel_futures=True)
-        deadline = time.monotonic() + args.shutdown_grace
+        remaining = max(0.0, args.shutdown_grace - (time.monotonic() - terminate_started))
+        deadline = time.monotonic() + remaining
         while time.monotonic() < deadline:
             counters, _ = _metrics.snapshot()
             if counters.get("active", 0) == 0:

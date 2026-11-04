@@ -56,6 +56,19 @@ class WorkerPoolTest(unittest.TestCase):
         self.assertEqual(counters["queued"], 0)
         self.assertEqual(counters["finished"], 2)
 
+    def test_cancelled_queued_job_releases_permit(self):
+        release = threading.Event()
+        first = microbench_server._submit(lambda: release.wait(2))
+        queued = microbench_server._submit(lambda: None)
+        self.assertTrue(queued.cancel())
+        third = microbench_server._submit(lambda: 3)
+        release.set()
+        self.assertEqual(third.result(timeout=2), 3)
+        first.result(timeout=2)
+        counters, _ = microbench_server._metrics.snapshot()
+        self.assertEqual(counters["queued"], 0)
+        self.assertGreaterEqual(counters["cancelled"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

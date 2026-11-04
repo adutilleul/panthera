@@ -709,13 +709,15 @@ Result:
 - `Stats` RPC (and `microbench_client.py --stats`): counters for requests,
   admitted/running/queued/finished, cache result/trace/miss/hits, trace/sim
   runs, rejections, deadlines, and errors, plus p50/p95 request latency.
-- Deadlines are absolute across the queue: queued jobs are cancelled, and the
-  QEMU/`amperesys` subprocess timeouts are derived from the remaining
+- Deadlines are absolute across the queue: queued jobs are cancelled (with a
+  done callback that releases the admission permit and queued accounting), and
+  the QEMU/`amperesys` subprocess timeouts are derived from the remaining
   deadline. Trace-generation timeouts now map to `DEADLINE_EXCEEDED`.
 - Stress check: 6 concurrent requests with 2 workers + 2 queue slots produced
   4 successes and 2 `RESOURCE_EXHAUSTED`; after completion `queued=0`,
   `finished=4`; SIGTERM exited 0.
-- Tests: worker-pool admission/result and metrics/Stats tests; 35 total.
+- Tests: worker-pool admission/result, cancellation/permit release, and
+  metrics/Stats tests; 36 total.
 
 Scope: trace/simulation workers. The C++ server's process model remains
 Step 3.4; this is the sidecar implementation.
