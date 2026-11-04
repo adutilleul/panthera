@@ -54,8 +54,13 @@ public:
         writer = new is::InstructionStreamWriter(tmp_filename, stream_features);
         assert(writer);
 
-        for (const auto& [sysreg, value] : sysregs)
-            sysreg_write(sysreg, value);
+        for (const auto& [sysreg, value] : sysregs) {
+            // User-mode sysreg values (TPIDR*, timers, ...) are process-specific
+            // and would make otherwise-identical flat traces differ. Flat traces
+            // do not use them; omit them to keep the trace deterministic.
+            if (!flat_map)
+                sysreg_write(sysreg, value);
+        }
         el_change(el, ContextUpdateType::TRACING);
     }
     virtual ~ISTracer() {}

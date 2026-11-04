@@ -20,6 +20,7 @@ from concurrent import futures
 from pathlib import Path
 
 import grpc
+from qemu_trace_source import CODE_ENTRY, QemuTraceSource, TraceError
 
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "proto"
@@ -30,6 +31,8 @@ DEFAULT_LISTEN = "unix:///tmp/panthera-microbench.sock"
 SERVICE = "ampere.microbench.Microbench"
 MAX_CODE_BYTES = 16 * 1024 * 1024
 MAX_BATCH = 64
+
+_trace_source: QemuTraceSource | None = None
 
 
 def ensure_generated():
@@ -52,22 +55,32 @@ pb = ensure_generated()
 
 
 def _run_impl(request):
-    started = time.perf_counter_ns()
+    if _trace_source is None:
+        raise TraceError("trace source is not configured")
     if not request.code:
         raise ValueError("code is empty")
     if len(request.code) % 4 != 0:
         raise ValueError("code length must be a multiple of 4 bytes")
     if len(request.code) > MAX_CODE_BYTES:
         raise ValueError(f"code exceeds {MAX_CODE_BYTES} bytes")
-    if request.max_instructions == 0 and request.max_cycles == 0:
-        raise ValueError("at least one of max_instructions or max_cycles is required")
-    words = len(request.code) // 4
+    if request.data:
+        raise ValueError("data sections are not supported yet")
+    if request.entry_pc not in (0, CODE_ENTRY):
+        raise ValueError(f"entry_pc must be 0 or {CODE_ENTRY:#x}")
+    if request.max_instructions == 0:
+        raise ValueError("max_instructions is required for trace generation")
+
+    result = _trace_source.run(
+        request.code,
+        request.max_instructions,
+        name=f"run_{time.time_ns()}",
+    )
     return pb.RunResponse(
-        cycles=words,
-        instructions=words,
-        ipc=1.0,
-        wall_ns=time.perf_counter_ns() - started,
-        log=f"spike: {words} instruction words, entry=0x{request.entry_pc:x}",
+        cycles=0,
+        instructions=result.measurement or result.instructions,
+        ipc=0.0,
+        wall_ns=result.generation_ns,
+        log=result.summary(),
     )
 
 
@@ -76,6 +89,8 @@ def run(request, context):
         return _run_impl(request)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+    except TraceError as error:
+        context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
 
 
 def run_batch(request, context):
@@ -85,6 +100,8 @@ def run_batch(request, context):
         return pb.RunBatchResponse(responses=[_run_impl(item) for item in request.requests])
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+    except TraceError as error:
+        context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
 
 
 def health(request, context):
@@ -137,21 +154,23 @@ def serve(address, workers=4, allow_remote=False):
     return server
 
 
-def run_self_test(address, allow_remote=False):
+def run_self_test(address, allow_remote=False, trace_source=None):
+    global _trace_source
     from microbench_client import call, health_check  # noqa: PLC0415
 
+    _trace_source = trace_source
     server = serve(address, allow_remote=allow_remote)
     try:
         response = call(
             address,
             pb.RunRequest(
-                entry_pc=0x400000,
+                entry_pc=CODE_ENTRY,
                 code=b"\x80\x0c\x80\xd2",  # mov x0, #100
                 max_instructions=1,
             ),
         )
         assert response.instructions == 1, response
-        assert response.cycles == 1, response
+        assert "trace=" in response.log, response
         assert health_check(address).status == "ok"
     finally:
         server.stop(0).wait()
@@ -159,6 +178,7 @@ def run_self_test(address, allow_remote=False):
 
 
 def main(argv=None):
+    global _trace_source
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=DEFAULT_LISTEN)
     parser.add_argument("--self-test", action="store_true")
@@ -167,14 +187,29 @@ def main(argv=None):
         action="store_true",
         help="allow a non-Unix listen address (default: Unix socket only)",
     )
+    parser.add_argument("--qemu", default=None, help="path to tracing-QEMU qemu-aarch64")
+    parser.add_argument("--plugin", default=None, help="path to libinstruction_tracer.so")
+    parser.add_argument("--is-info", default=None, help="path to the is_info tool")
+    parser.add_argument("--trace-dir", default=None, help="directory for generated traces")
+    parser.add_argument("--trace-timeout", type=float, default=120.0)
     args = parser.parse_args(argv)
 
     try:
+        trace_source = QemuTraceSource(
+            qemu=args.qemu,
+            plugin=args.plugin,
+            is_info=args.is_info,
+            workdir=args.trace_dir,
+            timeout_s=args.trace_timeout,
+        )
         if args.self_test:
-            run_self_test(args.listen, allow_remote=args.allow_remote)
+            run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
             return 0
+        _trace_source = trace_source
         server = serve(args.listen, allow_remote=args.allow_remote)
     except ValueError as error:
+        parser.error(str(error))
+    except TraceError as error:
         parser.error(str(error))
     print(f"listening on {args.listen}", flush=True)
     try:

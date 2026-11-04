@@ -392,7 +392,7 @@ Result:
   `stop-tracing-after-measuring-instructions=500`, `max-traces=1`.
 - Plugin flags: `allow-missing-sysregs=true,flat-map=true`.
 - Output: `mem_0.is.xz` (~2 KiB; `is_info`: 601 instructions = 500 measurement
-  + 101 cooldown, 112 memops, 54 memory events, 33 sysreg events); `is_count`
+  + 101 cooldown, 112 memops, 54 memory events, 0 sysreg events); `is_count`
   parses a realistic mix (ADD/SUBS/LDR/branches/etc.).
 
 Plugin changes required:
@@ -400,8 +400,9 @@ Plugin changes required:
   such as `CNTKCTL_EL1`; the tracer now warns and skips them instead of
   exiting.
 - `flat-map` for `.is`: identity VA=PA mapping. The tracer skips sysreg-based
-  translation, sets instruction/memop PAs to their VAs, and reads memory
-  values through QEMU's virtual-memory path (54 memory events in the spike).
+  translation, sets instruction/memop PAs to their VAs, reads memory values
+  through QEMU's virtual-memory path (54 memory events in the spike), and
+  omits process-specific sysreg writes so identical runs are byte-identical.
   This is also the mapping the microbench server uses.
 - `INSTRUCTION_TRACER_SC_API_SHIM`: opt-in SystemC API-version stub for hosts
   whose `libsystemc` was built with a different `SC_CPLUSPLUS` (the plugin is
@@ -565,29 +566,67 @@ and filesystem races.
 
 #### Step 1.3 — User-mode QEMU trace source
 
-Precondition: the security boundary in section 3.1 is decided. User-mode QEMU
-executes client-supplied bytes as host syscalls; do not expose it to untrusted
-clients.
+Status: **DONE (2026-11-04)**. Implemented in the Python sidecar as
+`qemu_trace_source.py`; the C++ path is deferred until the runner exists.
+
+Result:
+- `Run` wraps the submitted words in a static AArch64 harness ELF, places the
+  code at `0x400100`, runs tracing-QEMU 8.0 with the patched plugin, and
+  returns the `.is.xz` plus `is_info` metadata.
+- Harness: `_start` at `0x400000`, fixed BSS stack, zeroed `x0`–`x29`, `bl` to
+  the code, exit syscall; `--build-id=none` avoids a linker note overlapping
+  the `.org` padding.
+- Triggers: `start-tracing-after-pc=0x400100`,
+  `stop-tracing-after-measuring-instructions=N`, `cooldown-instructions=100`,
+  `max-traces=1`, `allow-missing-sysregs=true,flat-map=true`.
+- The source monitors the output and terminates QEMU once the trace is
+  finalized; `max-traces=1` stops tracing but does not exit a self-looping
+  harness by itself.
+- Determinism: two identical runs produce byte-identical `.is.xz` (SHA-256
+  verified). Flat traces omit sysreg writes because user-mode TPIDR*/timer
+  values are process-specific; the trace has 0 sysreg events.
+- Latency (3 reps; includes harness assembly + QEMU startup):
+
+  | Instructions | Median | Min | Max |
+  |---:|---:|---:|---:|
+  | 10k | 0.397 s | 0.396 s | 0.399 s |
+  | 100k | 3.341 s | 3.258 s | 3.558 s |
+  | 1k (self-test) | 0.094 s | — | — |
+
+  For comparison, simulation alone is ~1.15 s at 10k and ~8–10 s at 100k, so
+  trace generation is not the dominant cold-path cost at these sizes.
+
+Limitations:
+- `max_instructions` is required; `max_cycles` alone is not supported.
+- `entry_pc` must be 0 or `0x400100`; the code base is fixed.
+- Data sections are rejected; `.data`/`.bss` support is a follow-up.
+- `cycles`/`ipc` are 0 until the Step 3.2 runner.
+- The trace has flat PAs but no TCR/TTBR/page tables; `amperesys` still needs
+  the Step 2.1 flat mapping.
 
 Work:
 - Wrap the benchmark bytes in a statically linked bare-metal ELF (or a small
   harness ELF with a loadable code blob). Build non-PIE (`-no-pie`) and avoid
-  ASLR-dependent addresses so traces are reproducible.
-- Launch `qemu-aarch64` with the plugin; no kernel/rootfs.
+  ASLR-dependent addresses so traces are reproducible. **Done.**
+- Launch `qemu-aarch64` with the plugin; no kernel/rootfs. **Done.**
 - Add the minimal plugin trigger mode chosen in Gate 0.B if existing modes are
-  insufficient.
-- Capture `.is` and the memory image; return a `TraceResult`.
+  insufficient. **Not needed; PC/count triggers suffice.**
+- Capture `.is` and the memory image; return a `TraceResult`. **Done for
+  `.is`; data sections pending.**
 
 Acceptance: end-to-end trace from raw bytes; same input produces byte-identical
-output across runs (determinism); failure paths (plugin missing, QEMU crash,
-timeout) return structured errors.
+output across runs; failure paths (plugin missing, QEMU crash, timeout) return
+structured errors. **Met for code-only traces and determinism; data sections
+remain a follow-up.**
 
-Files: `src/ampere/microbench/qemu_trace_source.{h,cc}`, possibly
-`src/ampere/tracing_tools/instruction_tracer.cc` and `is_tracer.h`;
-harness under `src/ampere/microbench/qemu/`.
+Files: `src/ampere/microbench/python/qemu_trace_source.py`,
+`src/ampere/microbench/python/microbench_server.py`,
+`src/ampere/microbench/python/microbench_client.py`,
+`src/ampere/microbench/python/README.md`.
 
 Subagent: review subagent checks process hygiene (no zombies, no leaked fds),
-timeout handling, and that plugin changes are backward compatible.
+timeout handling, determinism, and that plugin changes are backward
+compatible.
 
 #### Step 1.4 — Bare-metal system-mode fallback
 
@@ -980,9 +1019,9 @@ rate from 10k to 30k is ~11.5 kips; long runs are 10.6–13.6 kips.
 
 Step 0.3 addendum: user-mode QEMU 8.0 + the patched plugin produced a
 601-instruction `.is.xz` (500 measurement, 101 cooldown; 112 memops, 54 memory
-events, 33 sysreg events) from a static `tiny_arm` loop. `is_info` and
-`is_count` parse it; `amperesys` still needs a flat page-table/TCR setup for
-this trace (Step 2.1).
+events, 0 sysreg events) from a static `tiny_arm` loop. Flat traces omit
+process-specific sysregs for determinism. `is_info` and `is_count` parse it;
+`amperesys` still needs a flat page-table/TCR setup for this trace (Step 2.1).
 
 ### Step 0.1 findings
 

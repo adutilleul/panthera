@@ -41,7 +41,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=DEFAULT_LISTEN)
     parser.add_argument("--code-hex", default="d2800c80", help="comma-separated 32-bit words")
-    parser.add_argument("--entry-pc", type=lambda value: int(value, 0), default=0x400000)
+    parser.add_argument("--entry-pc", type=lambda value: int(value, 0), default=0x400100)
     parser.add_argument("--max-instructions", type=int, default=1000)
     parser.add_argument("--health", action="store_true")
     args = parser.parse_args(argv)
