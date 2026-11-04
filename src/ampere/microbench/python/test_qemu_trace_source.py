@@ -117,9 +117,15 @@ class IntegrationTest(unittest.TestCase):
         self.assertTrue(result.mem_path.exists())
         self.assertEqual(result.mem_path.stat().st_size, 12 + 4096)
 
+    def test_code_too_large_for_flat_layout(self):
+        source = QemuTraceSource(timeout_s=1)
+        code = b"\x00" * (FLAT_TABLE_PA - CODE_ENTRY)
+        with self.assertRaises(TraceError):
+            source.run(code, 1)
+
     def test_trace_with_data(self):
         source = QemuTraceSource(timeout_s=60)
-        # movz x1, #0x70, lsl #16; loop: ldr x0,[x1]; add; str; b loop
+        # movz x1, #0xb0, lsl #16; loop: ldr x0,[x1]; add; str; b loop
         words = [0xD2A01601, 0xF9400020, 0x91000400, 0xF9000020, 0x17FFFFFD]
         code = b"".join(word.to_bytes(4, "little") for word in words)
         payload = (41).to_bytes(8, "little")

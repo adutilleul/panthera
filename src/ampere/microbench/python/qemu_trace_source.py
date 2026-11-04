@@ -263,7 +263,7 @@ class QemuTraceSource:
         if max_instructions <= 0:
             raise TraceError("max_instructions must be positive")
         data_sections = validate_data_sections(data_sections)
-        if CODE_ENTRY + len(code) > FLAT_TABLE_PA:
+        if CODE_ENTRY + len(code) + 4 > FLAT_TABLE_PA:  # trailing b .
             raise TraceError("code overlaps the flat page table")
 
         started = time.perf_counter_ns()
