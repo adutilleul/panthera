@@ -34,7 +34,7 @@ milliseconds" target was based on a wrong assumption about trace generation.
 |---|---:|---:|---:|
 | Result-cache hit p50 | <= 5 ms | <= 5 ms | <= 5 ms |
 | Simulate path (no QEMU), p50 | ~2.9 s | ~11.5 s | ~77 s |
-| Cold request (QEMU + simulation) p50 | TBD; user-mode producer available | TBD | TBD |
+| Cold request (QEMU + simulation) p50 | ~1.9 s | ~7.3 s | — |
 | Throughput per worker | ~0.35 req/s | ~0.09 req/s | ~0.013 req/s |
 
 Basis: 10k/30k rates measured on `domino.cfg` (~9.5–11 kips); long-trace rates
@@ -705,11 +705,11 @@ checks state isolation and zombie/fd handling.
 
 **Gate 1:** the revised targets in section 1 are met: result-cache hit
 <= 5 ms, simulate path within the stated times, and QEMU absent on a hit. The
-cold QEMU number can now be measured with the Step 0.3 user-mode producer. Until
-`SimulationRunner` exists (Step 3.2), measure through a temporary `amperesys`
-subprocess shim and label the numbers as shim-only. Do not finalize the phase-2
-deferral until at least one cold QEMU request has been measured. If the targets
-are met, phase 2 can be deferred.
+cold path is now measured through the Step 3.2 subprocess shim: 10k = 1.89 s,
+100k = 7.33 s. The result cache (Step 1.2) is not implemented yet, so Gate 1 is
+not final. Do not finalize the phase-2 deferral until at least one cold QEMU
+request has been measured (done) and the result-cache hit path is measured.
+If the targets are met, phase 2 can be deferred.
 
 ---
 
@@ -860,17 +860,39 @@ compatibility (the repo pins `protobuf_21`).
 
 #### Step 3.2 — Runner library
 
+Status: **PARTIAL (2026-11-04)** — v1 subprocess shim in the Python sidecar.
+The in-process C++ runner remains for the C++ server.
+
+Result:
+- `simulation_runner.py` runs `amperesys` on the generated trace and its
+  `.mem` page table, parses the `Simulator measurement` line, and returns
+  cycles, instructions, IPC, and wall time.
+- Server `Run` returns real metrics when the runner is configured
+  (`--amperesys`/`--config` or `PANTHERA_AMPERESYS`/`PANTHERA_CONFIG`);
+  otherwise it returns trace metadata with `cycles=0`.
+- Cold-path totals (trace + simulation, 2 reps):
+  - 1 instruction: 1.33 s
+  - 10k: 1.89 s (trace 0.38 s + sim 1.51 s), 9,845 cycles, IPC 1.016
+  - 100k: 7.33 s (trace 3.07 s + sim 4.27 s), 99,845 cycles, IPC 1.002
+- `amperesys` startup (~1.4 s) dominates tiny requests; the in-process runner
+  or a warm worker is the fix.
+
 Work:
 - Extract the `sc_main`-equivalent setup into a callable `SimulationRunner`:
   fresh `sc_simcontext`, `Environment`, `Clock`, `Sys`, event collector.
+  **Deferred for C++; the sidecar uses a subprocess.**
 - In-process results via an `EventStreamDummy`-style collector; no `evp`, no
-  files.
-- Return cycles, instructions, IPC, PMU map, wall time, and logs.
+  files. **Deferred.**
+- Return cycles, instructions, IPC, PMU map, wall time, and logs. **Cycles,
+  instructions, IPC, wall time done; PMU map deferred.**
 
 Acceptance: a runner unit test reproduces `amperesys` metrics for a known
-trace/config; two sequential runs in one process are independent.
+trace/config; two sequential runs in one process are independent. **Met via
+the subprocess shim for the sidecar; in-process independence is deferred.**
 
-Files: `src/ampere/microbench/runner.{h,cc}` + tests.
+Files: `src/ampere/microbench/python/simulation_runner.py`,
+`src/ampere/microbench/python/test_simulation_runner.py`; the C++
+`src/ampere/microbench/runner.{h,cc}` is deferred.
 
 #### Step 3.3 — RPC handlers
 
@@ -944,6 +966,9 @@ src/ampere/microbench/
   python/                    # v1 gRPC sidecar (Step 0.4)
     microbench_server.py
     microbench_client.py
+    qemu_trace_source.py
+    simulation_runner.py
+    test_*.py
   CMakeLists.txt             # if/when the C++ server is revived
   server.cc                  # C++ gRPC server (deferred)
   runner.{h,cc}
@@ -1066,6 +1091,11 @@ Step 0.3 addendum: user-mode QEMU 8.0 + the patched plugin produced a
 events, 3 synthetic TCR/TTBR sysreg events) from a static `tiny_arm` loop.
 The trace source also writes a `.mem` page table; `amperesys` now consumes the
 trace (Step 2.1).
+
+Step 3.2 cold path (trace + simulation, 2 reps): 10k = 1.89 s (trace 0.38 s +
+sim 1.51 s, 9,845 cycles, IPC 1.016); 100k = 7.33 s (trace 3.07 s + sim
+4.27 s, 99,845 cycles, IPC 1.002); 1 instruction = 1.33 s. `amperesys`
+startup (~1.4 s) dominates tiny requests.
 
 ### Step 0.1 findings
 

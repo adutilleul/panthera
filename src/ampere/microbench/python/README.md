@@ -19,6 +19,7 @@ transport overhead is not material.
 - `libinstruction_tracer.so` built against that QEMU
 - `aarch64-linux-gnu-gcc` for the harness
 - `is_info` for trace validation and metadata
+- `amperesys` and a system config (for example `siryn.cfg`) for cycles/IPC
 
 Configure paths with environment variables or CLI flags:
 
@@ -26,9 +27,12 @@ Configure paths with environment variables or CLI flags:
 export PANTHERA_QEMU_AARCH64=/path/to/qemu-aarch64
 export PANTHERA_TRACER_PLUGIN=/path/to/libinstruction_tracer.so
 export PANTHERA_IS_INFO=/path/to/is_info
+export PANTHERA_AMPERESYS=/path/to/amperesys
+export PANTHERA_CONFIG=/path/to/siryn.cfg
 ```
 
-The corresponding flags are `--qemu`, `--plugin`, and `--is-info`. `is_info` is
+The corresponding flags are `--qemu`, `--plugin`, `--is-info`, `--amperesys`,
+and `--config`. `is_info` is
 required: the trace source rejects a trace whose measurement count is below the
 requested `max_instructions`.
 
@@ -78,13 +82,17 @@ amperesys -cfg <panthera-root>/install/config/model/sys/siryn.cfg \
   -sys.soc_0.core_0.gpc.max_instructions 1000
 ```
 
-The server still returns `cycles=0`; running the simulator from the server is
-Step 3.2.
+`Run` returns real `cycles`, `instructions`, and `ipc` when the `amperesys`
+runner is configured (`--amperesys`/`--config` or the environment); otherwise it
+returns the trace metadata with `cycles=0`. The runner starts a fresh
+`amperesys` per request, so its ~1.4 s startup dominates very small
+benchmarks. Cold-path totals measured here: 10k = 1.89 s, 100k = 7.33 s
+(trace + simulation).
 
 ## Tests
 
 ```sh
-python3 -m unittest -v test_qemu_trace_source
+python3 -m unittest -v test_qemu_trace_source test_simulation_runner
 ```
 
 The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,

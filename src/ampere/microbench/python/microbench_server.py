@@ -22,6 +22,7 @@ from pathlib import Path
 
 import grpc
 from qemu_trace_source import CODE_ENTRY, QemuTraceSource, TraceError
+from simulation_runner import SimulationError, SimulationRunner
 
 HERE = Path(__file__).resolve().parent
 PROTO_DIR = HERE.parent / "proto"
@@ -35,6 +36,7 @@ MAX_INSTRUCTIONS = 1_000_000
 MAX_BATCH = 64
 
 _trace_source: QemuTraceSource | None = None
+_simulation_runner: SimulationRunner | None = None
 _run_slots = threading.BoundedSemaphore(4)
 
 
@@ -80,17 +82,40 @@ def _run_impl(request, timeout_s=None):
     if request.max_instructions > MAX_INSTRUCTIONS:
         raise ValueError(f"max_instructions exceeds {MAX_INSTRUCTIONS}")
 
+    started = time.monotonic()
     result = _trace_source.run(
         request.code,
         request.max_instructions,
         timeout_s=timeout_s,
     )
+    simulation = None
+    if _simulation_runner is not None:
+        remaining = None
+        if timeout_s is not None:
+            remaining = max(0.1, timeout_s - (time.monotonic() - started))
+        simulation = _simulation_runner.run(
+            result.path,
+            request.max_instructions,
+            timeout_s=remaining,
+        )
+    if simulation is not None:
+        cycles = simulation.cycles
+        instructions = simulation.instructions
+        ipc = simulation.ipc
+        wall_ns = result.generation_ns + simulation.wall_ns
+        log = f"{result.summary()} {simulation.summary()}"
+    else:
+        cycles = 0
+        instructions = result.measurement or result.instructions
+        ipc = 0.0
+        wall_ns = result.generation_ns
+        log = f"{result.summary()} simulator=disabled"
     return pb.RunResponse(
-        cycles=0,
-        instructions=result.measurement or result.instructions,
-        ipc=0.0,
-        wall_ns=result.generation_ns,
-        log=result.summary(),
+        cycles=cycles,
+        instructions=instructions,
+        ipc=ipc,
+        wall_ns=wall_ns,
+        log=log,
     )
 
 
@@ -104,7 +129,7 @@ def run(request, context):
         return _run_impl(request, remaining)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-    except TraceError as error:
+    except (TraceError, SimulationError) as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
     finally:
         _run_slots.release()
@@ -125,7 +150,7 @@ def run_batch(request, context):
         return pb.RunBatchResponse(responses=responses)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-    except TraceError as error:
+    except (TraceError, SimulationError) as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
     finally:
         _run_slots.release()
@@ -182,7 +207,7 @@ def serve(address, workers=4, allow_remote=False):
 
 
 def run_self_test(address, allow_remote=False, trace_source=None):
-    global _trace_source
+    global _trace_source, _simulation_runner
     from microbench_client import call, health_check  # noqa: PLC0415
 
     _trace_source = trace_source
@@ -205,7 +230,7 @@ def run_self_test(address, allow_remote=False, trace_source=None):
 
 
 def main(argv=None):
-    global _trace_source
+    global _trace_source, _simulation_runner
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=DEFAULT_LISTEN)
     parser.add_argument("--self-test", action="store_true")
@@ -226,6 +251,9 @@ def main(argv=None):
     parser.add_argument("--trace-dir", default=None, help="directory for generated traces")
     parser.add_argument("--trace-timeout", type=float, default=120.0)
     parser.add_argument("--keep-intermediates", action="store_true")
+    parser.add_argument("--amperesys", default=None, help="path to the amperesys binary")
+    parser.add_argument("--config", default=None, help="system config for amperesys")
+    parser.add_argument("--sim-timeout", type=float, default=600.0)
     args = parser.parse_args(argv)
 
     if args.allow_remote and not args.allow_untrusted:
@@ -245,6 +273,16 @@ def main(argv=None):
             timeout_s=args.trace_timeout,
             keep_intermediates=args.keep_intermediates,
         )
+        try:
+            simulation_runner = SimulationRunner(
+                amperesys=args.amperesys,
+                config=args.config,
+                timeout_s=args.sim_timeout,
+            )
+        except SimulationError as error:
+            print(f"warning: simulator runner disabled: {error}", file=sys.stderr)
+            simulation_runner = None
+        _simulation_runner = simulation_runner
         if args.self_test:
             run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
             return 0
