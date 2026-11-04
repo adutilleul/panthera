@@ -5,7 +5,10 @@
 
 #include "ampere/archx/driver.h"
 #include "ampere/archx/driver_bs.h"
+#include "ampere/archx/driver_code.h"
 #include "ampere/archx/driver_is.h"
+
+#include <string_view>
 
 namespace ampere::archx {
 
@@ -16,6 +19,13 @@ std::unique_ptr<Driver> makeDriver(std::string filename,
                                    std::uint64_t validate_emulation,
                                    std::string mem_image_path)
 {
+    // Step 0.2 spike: a raw AArch64 image selected with a "code:" prefix.
+    // Existing callers keep the DriverIS behavior unchanged.
+    constexpr std::string_view code_prefix{"code:"};
+    if (filename.rfind(code_prefix, 0) == 0) {
+        return std::make_unique<DriverCode>(filename.substr(code_prefix.size()));
+    }
+
     return std::make_unique<DriverIS>(filename,
                                       skip_instructions,
                                       speculative_memory_image,
