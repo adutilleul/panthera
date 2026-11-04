@@ -16,6 +16,8 @@ class InstructionStreamWriter : public ProtobufStreamWriter
 {
 public:
     InstructionStreamWriter(boost::filesystem::path filepath, const Features features);
+    // Takes ownership of fd.
+    InstructionStreamWriter(int fd, const Features features);
     bool write(const Instruction& instruction);
     bool write(const Event& event);
     void finalize();
@@ -29,11 +31,14 @@ class InstructionStreamReader : public ProtobufStreamReader
 {
 public:
     InstructionStreamReader(boost::filesystem::path filepath);
+    // Takes ownership of fd.
+    InstructionStreamReader(int fd);
     const Features features() { return stream_features; }
     bool read(Instruction& instruction);
     bool read(Event& event) { return ProtobufStreamReader::read(event); }
 
 private:
+    void read_features();
     Features stream_features;
 };
 

@@ -15,11 +15,12 @@ namespace ampere {
 class ProtobufStreamWriter
 {
 public:
+    // fd constructors take ownership of the descriptor.
     ProtobufStreamWriter(int fd, uint32_t magic_number, uint32_t version);
     ProtobufStreamWriter(boost::filesystem::path filepath, uint32_t magic_number, uint32_t version, bool force = false);
     ~ProtobufStreamWriter();
     template<typename Item>
-    bool write(const Item &item);
+    bool write(const Item& item);
     bool flush();
 
 protected:
@@ -27,11 +28,12 @@ protected:
     std::unique_ptr<google::protobuf::io::FileOutputStream> output_stream;
 
 private:
-    FILE *fp{nullptr};
+    FILE* fp{nullptr};
+    bool fp_is_pipe{false};
 };
 
 template<typename Item>
-bool ProtobufStreamWriter::write(const Item &item)
+bool ProtobufStreamWriter::write(const Item& item)
 {
     return writeDelimitedTo(item, output_stream.get());
 }
@@ -39,41 +41,29 @@ bool ProtobufStreamWriter::write(const Item &item)
 class ProtobufStreamReader
 {
 public:
+    // fd constructors take ownership of the descriptor.
     ProtobufStreamReader(int fd, uint32_t magic_number, uint32_t max_version);
     ProtobufStreamReader(boost::filesystem::path filepath, uint32_t magic_number, uint32_t max_version);
     ~ProtobufStreamReader();
     uint32_t version() const { return stream_version; }
     template<typename Item>
-    bool read(Item &item);
+    bool read(Item& item);
 
 protected:
     boost::filesystem::path filepath;
     std::unique_ptr<google::protobuf::io::FileInputStream> input_stream;
 
 private:
-    FILE *fp{nullptr};
-    int fd{-1};
+    FILE* fp{nullptr};
+    bool fp_is_pipe{false};
     void verify_file_version(uint32_t magic_number, uint32_t max_version);
     uint32_t stream_version;
 };
 
 template<typename Item>
-bool ProtobufStreamReader::read(Item &item)
+bool ProtobufStreamReader::read(Item& item)
 {
-    bool status = true;
-    status = readDelimitedFrom(input_stream.get(), &item, nullptr);
-    if (!status) {
-        if (fp != nullptr) {
-            int status = pclose(fp);
-            if (status != 0) {
-                std::string msg("error reading from xzcat or gunzip for ");
-                msg += filepath.string();
-                throw std::system_error(errno, std::system_category(), msg);
-            }
-            fp = nullptr;
-        }
-    }
-    return status;
+    return readDelimitedFrom(input_stream.get(), &item, nullptr);
 }
 
 } // namespace ampere

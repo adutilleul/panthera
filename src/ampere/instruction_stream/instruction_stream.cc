@@ -24,6 +24,17 @@ InstructionStreamWriter::InstructionStreamWriter(boost::filesystem::path filepat
     }
 }
 
+InstructionStreamWriter::InstructionStreamWriter(int fd, const Features features)
+    : ProtobufStreamWriter(fd, protobuf_magic, protobuf_is_version),
+      started_measurement(false),
+      stopped_measurement(false),
+      finalize_called(false)
+{
+    if (!ProtobufStreamWriter::write(features)) {
+        throw std::runtime_error("Unable to write features field to beginning of instruction stream");
+    }
+}
+
 bool InstructionStreamWriter::write(const Instruction& instruction)
 {
     Event event;
@@ -75,6 +86,16 @@ InstructionStreamWriter::~InstructionStreamWriter()
 
 InstructionStreamReader::InstructionStreamReader(boost::filesystem::path filepath)
     : ProtobufStreamReader(filepath, protobuf_magic, protobuf_is_version)
+{
+    read_features();
+}
+
+InstructionStreamReader::InstructionStreamReader(int fd) : ProtobufStreamReader(fd, protobuf_magic, protobuf_is_version)
+{
+    read_features();
+}
+
+void InstructionStreamReader::read_features()
 {
     if (version() >= 4) {
         if (!ProtobufStreamReader::read(stream_features)) {

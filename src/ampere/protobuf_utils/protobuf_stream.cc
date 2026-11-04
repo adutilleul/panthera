@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <cstdio>
+#include <unistd.h>
 #include <boost/make_unique.hpp>
 #include <boost/format.hpp>
 #include <boost/process/search_path.hpp>
@@ -41,6 +42,7 @@ ProtobufStreamWriter::ProtobufStreamWriter(boost::filesystem::path filepath,
             std::remove(filepath.c_str());
         }
 
+        fp_is_pipe = true;
         fp = util::open_xz_output_file(filepath.c_str());
     } else {
         if (bf::exists(filepath)) {
@@ -57,7 +59,15 @@ ProtobufStreamWriter::ProtobufStreamWriter(boost::filesystem::path filepath,
             throw std::system_error(errno, std::system_category(), filepath.string());
         }
     }
-    output_stream = boost::make_unique<google::protobuf::io::FileOutputStream>(fileno(fp));
+    const int stream_fd = dup(fileno(fp));
+    if (stream_fd < 0) {
+        if (fp_is_pipe)
+            pclose(fp);
+        else
+            fclose(fp);
+        throw std::system_error(errno, std::system_category(), filepath.string());
+    }
+    output_stream = boost::make_unique<google::protobuf::io::FileOutputStream>(stream_fd);
 
     writeHeaderTo(magic_number, version, output_stream.get());
     flush();
@@ -66,12 +76,16 @@ ProtobufStreamWriter::ProtobufStreamWriter(boost::filesystem::path filepath,
 ProtobufStreamWriter::~ProtobufStreamWriter()
 {
     flush();
+    output_stream->Close();
+    output_stream.reset();
     if (fp != nullptr) {
-        if (pclose(fp) == -1) {
-            perror("Error calling pclose on xz's fd");
+        if (fp_is_pipe) {
+            if (pclose(fp) == -1)
+                perror("Error closing protobuf pipe");
+        } else if (fclose(fp) != 0) {
+            perror("Error closing protobuf file");
         }
     }
-    output_stream.get()->Close();
 }
 
 bool ProtobufStreamWriter::flush()
@@ -98,6 +112,7 @@ ProtobufStreamReader::ProtobufStreamReader(boost::filesystem::path filepath,
         }
 
         fp = util::open_xz_input_file(filepath.c_str());
+        fp_is_pipe = true;
     } else if (filepath.extension() == ".gz") {
         if (!bf::exists(filepath)) {
             throw std::system_error(errno, std::system_category(), filepath.string());
@@ -114,15 +129,33 @@ ProtobufStreamReader::ProtobufStreamReader(boost::filesystem::path filepath,
         if (fp == nullptr) {
             throw std::system_error(errno, std::system_category(), "popen() failed");
         }
+        fp_is_pipe = true;
     } else {
         fp = fopen(filepath.c_str(), "r");
         if (!fp) {
             throw std::system_error(errno, std::system_category(), filepath.string());
         }
     }
-    input_stream = boost::make_unique<google::protobuf::io::FileInputStream>(fileno(fp));
+    const int stream_fd = dup(fileno(fp));
+    if (stream_fd < 0) {
+        if (fp_is_pipe)
+            pclose(fp);
+        else
+            fclose(fp);
+        throw std::system_error(errno, std::system_category(), filepath.string());
+    }
+    input_stream = boost::make_unique<google::protobuf::io::FileInputStream>(stream_fd);
 
-    verify_file_version(magic_number, max_version);
+    try {
+        verify_file_version(magic_number, max_version);
+    } catch (...) {
+        if (fp_is_pipe)
+            pclose(fp);
+        else
+            fclose(fp);
+        fp = nullptr;
+        throw;
+    }
 }
 
 void ProtobufStreamReader::verify_file_version(uint32_t magic_number, uint32_t max_version)
@@ -139,21 +172,16 @@ void ProtobufStreamReader::verify_file_version(uint32_t magic_number, uint32_t m
 
 ProtobufStreamReader::~ProtobufStreamReader()
 {
-    int status(0);
-    char buf[256];
+    input_stream->Close();
+    input_stream.reset();
     if (fp != nullptr) {
-        status = pclose(fp);
-        if (status == -1) {
-            snprintf(buf, sizeof(buf), "Error calling pclose on xzcat or gunzip's fd (%s)", strerror(status));
-            perror(buf);
-        }
-    } else if (fd != -1) {
-        status = close(fd);
-        if (status == -1) {
-            perror("Error closing event stream file descriptor");
+        if (fp_is_pipe) {
+            if (pclose(fp) == -1)
+                perror("Error closing protobuf pipe");
+        } else if (fclose(fp) != 0) {
+            perror("Error closing protobuf file");
         }
     }
-    input_stream.get()->Close();
 }
 
 } // namespace ampere

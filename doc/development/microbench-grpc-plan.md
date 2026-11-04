@@ -451,6 +451,24 @@ chosen. **Resolved: sidecar chosen for v1.**
 
 #### Step 1.1 — Uncompressed, fd-capable instruction streams
 
+Status: **DONE (2026-11-04)**. Added `InstructionStreamReader(fd)` and
+`InstructionStreamWriter(fd)`. Ownership is now explicit:
+
+- fd constructors hand the descriptor to `FileInputStream`/`FileOutputStream`,
+  which close it.
+- path constructors `dup(fileno(fp))` for the protobuf stream and close the
+  original `FILE*` with `pclose` for pipes or `fclose` for plain files.
+
+This fixes two pre-existing issues: the reader destructor's `pclose` plus
+`FileInputStream::Close()` double close, and calling `pclose` on plain `fopen`
+streams. Uncompressed `.is` was already selected by filename extension and is
+covered by the existing `test.is` fixture.
+
+A new pipe round-trip test writes START + two instructions + STOP, reads them
+back through the fd reader, confirms EOF, and verifies both descriptors are
+closed after the reader/writer are destroyed. All 8
+`instruction_stream_unit` and 14 `event_stream_unit` tests pass.
+
 Work:
 - Add an `InstructionStreamReader` constructor/overload that accepts an fd or
   stream, mirroring `ProtobufStreamReader(int fd, ...)`.
@@ -458,10 +476,11 @@ Work:
 - Keep the compressed path for archival traces.
 
 Acceptance: unit test reads a stream from a pipe; existing `.is.xz` tests pass
-unchanged.
+unchanged. **Met.**
 
 Files: `src/ampere/instruction_stream/instruction_stream.{h,cc}`,
-`src/ampere/protobuf_utils/*`, tests in `src/ampere/instruction_stream/test/`.
+`src/ampere/protobuf_utils/protobuf_stream.{h,cc}`,
+`src/ampere/instruction_stream/test/test_is_reader.cc`.
 
 Subagent: review subagent checks API consistency and that no compression
 behavior changed.
