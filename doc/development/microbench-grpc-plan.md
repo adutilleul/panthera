@@ -1062,9 +1062,8 @@ signal/exit handling.
 
 ### Phase 4 — Hardening and delivery (4–6 days)
 
-Status: **IN PROGRESS** (started 2026-11-04). Steps 4.1 and 4.2 are done and
-Step 4.3 installs the sidecar; the CI smoke test (4.3) and the performance
-sign-off (4.4) remain.
+Status: **DONE (2026-11-04)**, except that `make doc` could not run on this
+host (no `mkdocs`) and the CI service itself lives outside this repository.
 
 #### Step 4.1 — Test suite and registration
 
@@ -1078,7 +1077,9 @@ absent.
 - Verified with the full tool environment: the suite runs 44 tests and passes
   in ~1.7 s.
 - Verified without `PANTHERA_*`: the suite passes in ~0.2 s by skipping the
-  QEMU/`amperesys` cases, so no QEMU is required for `make unit-test`.
+  QEMU/`amperesys` cases. The suite carries the `integration` label, so
+  `make unit-test` excludes it; run it with `make integration`, `make test`,
+  or `ctest -R microbench_sidecar`.
 - `smoke_test.py` is registered as `microbench_sidecar_smoke` (label
   `integration`). It starts the server, runs one benchmark cold and once from
   the result cache, checks `Stats`, and verifies graceful shutdown. It skips
