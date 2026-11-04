@@ -27,15 +27,17 @@ from process_registry import register_child, unregister_child
 # below it and the code is followed by a self-loop.
 CODE_BASE = 0x400000
 CODE_ENTRY = 0x400100
-# Data sections live above the stack (0x600000) and inside the flat 1 GiB map.
-DATA_BASE = 0x700000
+# Code may use up to 4 MiB (0x400000-0x800100). Keep the page table, stack,
+# and data above that range, inside the flat 1 GiB map.
+STACK_BASE = 0xA00000
+DATA_BASE = 0xB00000
 DATA_LIMIT = 0x40000000
 MAX_DATA_BYTES = 2 * 1024 * 1024
 
 # Flat stage-1 mapping: 4 KiB granule, 39-bit VA, one level-1 1 GiB block at
 # VA/PA 0. These values must match the synthetic TCR/TTBR written by the
 # plugin's flat mode.
-FLAT_TABLE_PA = 0x500000
+FLAT_TABLE_PA = 0x900000
 FLAT_TCR_EL1 = 25 | (2 << 32)  # T0SZ=25, IPS=2
 
 
@@ -124,9 +126,9 @@ def _linker_script(data_sections: list[tuple[int, bytes]]) -> str:
         "ENTRY(_start)",
         "SECTIONS",
         "{",
-        "  . = 0x400000;",
+        f"  . = {CODE_BASE:#x};",
         "  .text : { *(.text) }",
-        "  . = 0x600000;",
+        f"  . = {STACK_BASE:#x};",
         "  .stack (NOLOAD) : { *(.stack) }",
     ]
     for index, (address, _) in enumerate(data_sections):
@@ -261,6 +263,8 @@ class QemuTraceSource:
         if max_instructions <= 0:
             raise TraceError("max_instructions must be positive")
         data_sections = validate_data_sections(data_sections)
+        if CODE_ENTRY + len(code) > FLAT_TABLE_PA:
+            raise TraceError("code overlaps the flat page table")
 
         started = time.perf_counter_ns()
         code_sha = hashlib.sha256(code).hexdigest()

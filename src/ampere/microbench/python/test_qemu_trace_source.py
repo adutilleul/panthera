@@ -120,7 +120,7 @@ class IntegrationTest(unittest.TestCase):
     def test_trace_with_data(self):
         source = QemuTraceSource(timeout_s=60)
         # movz x1, #0x70, lsl #16; loop: ldr x0,[x1]; add; str; b loop
-        words = [0xD2A00E01, 0xF9400020, 0x91000400, 0xF9000020, 0x17FFFFFD]
+        words = [0xD2A01601, 0xF9400020, 0x91000400, 0xF9000020, 0x17FFFFFD]
         code = b"".join(word.to_bytes(4, "little") for word in words)
         payload = (41).to_bytes(8, "little")
         result = source.run(code, 100, data_sections=[(DATA_BASE, payload)], name="data")

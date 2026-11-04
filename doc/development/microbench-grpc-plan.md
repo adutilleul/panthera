@@ -786,8 +786,8 @@ the user-mode trace.
 
 Result:
 - Plugin flat mode writes `TCR_EL1 = 25 | (2 << 32)` (4 KiB granule, 39-bit
-  VA, IPS=2), `TTBR0_EL1 = 0x500000`, and `TTBR1_EL1 = 0`.
-- The trace source writes `<trace>_0.mem` with a 4 KiB L1 table at `0x500000`:
+  VA, IPS=2), `TTBR0_EL1 = 0x900000`, and `TTBR1_EL1 = 0`.
+- The trace source writes `<trace>_0.mem` with a 4 KiB L1 table at `0x900000`:
   entry 0 is a level-1 1 GiB block descriptor (`0x401`, AF=1) mapping VA
   0–1 GiB to PA 0–1 GiB; other entries are invalid.
 - `amperesys -cfg siryn.cfg -instruction_stream_name <trace>` loads the `.mem`
@@ -796,12 +796,12 @@ Result:
   runs.
 - `RunRequest.data` sections are placed in the harness ELF at their requested
   VAs and written to `<trace>.mem` as memory records. Allowed range is
-  `0x700000`–1 GiB, total <= 2 MiB, no overlaps. The client exposes
+  `0xB00000`–1 GiB, total <= 2 MiB, no overlaps. The client exposes
   `--data-hex ADDRESS:HEX`.
-- Verified with a load/add/store loop over data at `0x700000`: 174 cycles,
+- Verified with a load/add/store loop over data at `0xB00000`: 174 cycles,
   100 instructions, IPC 0.575; changing the data rekeys the cache.
-- The mapping covers the code (`0x400000`–`0x400100`), stack (`0x600000`) and
-  data (`0x700000`+); addresses outside the low 1 GiB fault deterministically.
+- The mapping covers the code (`0x400000`–`0x400100`), stack (`0xA00000`) and
+  data (`0xB00000`+); addresses outside the low 1 GiB fault deterministically.
 
 Work:
 - Build a sparse `ArchState` from request sections. **Done: the `.mem`

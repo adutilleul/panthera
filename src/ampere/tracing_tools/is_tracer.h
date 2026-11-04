@@ -65,7 +65,7 @@ public:
             // Identity-map the low 1 GB with one level-1 block. The matching
             // page table is emitted by the trace source as <trace>.mem.
             sysreg_write(TCR_EL1, 25 | (2ULL << 32)); // T0SZ=25 (39-bit), IPS=2
-            sysreg_write(TTBR0_EL1, 0x500000);
+            sysreg_write(TTBR0_EL1, 0x900000);
             sysreg_write(TTBR1_EL1, 0);
         }
         el_change(el, ContextUpdateType::TRACING);

@@ -247,10 +247,10 @@ class ServerCacheTest(unittest.TestCase):
                 max_instructions=1,
             )
             first_request = microbench_server.pb.RunRequest(
-                **base, data=[microbench_server.pb.Section(address=0x700000, data=b"a")]
+                **base, data=[microbench_server.pb.Section(address=0xB00000, data=b"a")]
             )
             second_request = microbench_server.pb.RunRequest(
-                **base, data=[microbench_server.pb.Section(address=0x700000, data=b"b")]
+                **base, data=[microbench_server.pb.Section(address=0xB00000, data=b"b")]
             )
             with (
                 mock.patch.object(microbench_server, "_trace_source", source),

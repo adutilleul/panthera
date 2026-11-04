@@ -82,7 +82,7 @@ process-specific sysregs and emit fixed synthetic TCR/TTBR.
 The source also writes `<trace>.mem`, a flat level-1 page table mapping VA
 0–1 GiB to PA 0–1 GiB, plus any requested data sections. `RunRequest.data`
 sections are placed in the harness ELF at their requested VAs and written to
-the `.mem` image; addresses must be in `0x700000`–1 GiB, total data is capped
+the `.mem` image; addresses must be in `0xB00000`–1 GiB, total data is capped
 at 2 MiB, and sections must not overlap. The client exposes
 `--data-hex ADDRESS:HEX`. The trace and `.mem` are directly consumable by
 `amperesys`:
