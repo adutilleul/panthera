@@ -64,8 +64,11 @@ By default only Unix-domain sockets are accepted; pass `--allow-remote
 syscalls, so remote exposure without a sandbox is explicitly opt-in. Code is
 capped at 4 MiB, batches at 64 items, `max_instructions` at 1,000,000, and
 concurrent traces at 4 (`--max-concurrent`) plus 8 queued
-(`--queue-depth`). A full queue returns `RESOURCE_EXHAUSTED`; requests honor
-their RPC deadline. SIGTERM/SIGINT drains with `--shutdown-grace` seconds.
+(`--queue-depth`). A full queue returns `RESOURCE_EXHAUSTED`; queued requests
+respect the RPC deadline, and running trace/simulation subprocesses use the
+remaining deadline. SIGTERM/SIGINT terminates in-flight QEMU/`amperesys`
+children, cancels queued work, waits up to `--shutdown-grace` seconds, and
+removes the socket. Use `--stats` for counters and p50/p95 latency.
 `max_instructions` is required for trace generation.
 
 The harness places the code at `0x400100` after a small `_start` prologue that

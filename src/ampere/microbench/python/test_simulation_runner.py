@@ -36,6 +36,24 @@ class ParseMetricsTest(unittest.TestCase):
             parse_metrics("no metrics here")
 
 
+class FakeProcess:
+    def __init__(self, stdout="", stderr="", returncode=0, timeout=False):
+        self.pid = 12345
+        self._stdout = stdout
+        self._stderr = stderr
+        self._timeout = timeout
+        self.returncode = returncode
+
+    def communicate(self, timeout=None):
+        if self._timeout:
+            self._timeout = False
+            raise subprocess.TimeoutExpired(cmd="amperesys", timeout=timeout)
+        return self._stdout, self._stderr
+
+    def kill(self):
+        self.returncode = -9
+
+
 class RunnerTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -50,30 +68,23 @@ class RunnerTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_command_and_metrics(self):
-        completed = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=" Simulator measurement : 10 cycles, 5 instructions, 2.000 IPC",
-            stderr="",
-        )
-        with mock.patch("simulation_runner.subprocess.run", return_value=completed) as run:
+        process = FakeProcess(stdout=" Simulator measurement : 10 cycles, 5 instructions, 2.000 IPC")
+        with mock.patch("simulation_runner.subprocess.Popen", return_value=process) as popen:
             result = self.runner.run(self.trace, 1000)
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         self.assertIn("1000", command)
         self.assertIn("-max_time", command)
         self.assertEqual((result.cycles, result.instructions, result.ipc), (10, 5, 2.0))
 
     def test_nonzero_exit(self):
-        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
-        with mock.patch("simulation_runner.subprocess.run", return_value=completed):
+        process = FakeProcess(stderr="boom", returncode=1)
+        with mock.patch("simulation_runner.subprocess.Popen", return_value=process):
             with self.assertRaises(SimulationError):
                 self.runner.run(self.trace, 1)
 
     def test_timeout(self):
-        with mock.patch(
-            "simulation_runner.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="amperesys", timeout=1),
-        ):
+        process = FakeProcess(timeout=True)
+        with mock.patch("simulation_runner.subprocess.Popen", return_value=process):
             with self.assertRaises(TimeoutError):
                 self.runner.run(self.trace, 1)
 

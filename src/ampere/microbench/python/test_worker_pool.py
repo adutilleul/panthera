@@ -14,6 +14,7 @@ class MetricsTest(unittest.TestCase):
         metrics = microbench_server.Metrics()
         metrics.inc("requests", 2)
         metrics.inc("admitted", 2)
+        metrics.inc("queued", 1)
         metrics.inc("running", 1)
         metrics.observe_ms(10.0)
         metrics.observe_ms(20.0)
@@ -50,6 +51,10 @@ class WorkerPoolTest(unittest.TestCase):
         release.set()
         first.result(timeout=2)
         second.result(timeout=2)
+        counters, _ = microbench_server._metrics.snapshot()
+        self.assertEqual(counters["active"], 0)
+        self.assertEqual(counters["queued"], 0)
+        self.assertEqual(counters["finished"], 2)
 
 
 if __name__ == "__main__":

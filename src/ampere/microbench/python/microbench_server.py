@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import grpc
+from process_registry import terminate_all
 from qemu_trace_source import CODE_ENTRY, FLAT_TABLE_PA, QemuTraceSource, TraceError
 from simulation_runner import SimulationError, SimulationRunner
 from trace_cache import ResultCache, TraceCache, config_fingerprint, file_fingerprint
@@ -75,7 +76,8 @@ class Metrics:
         with self._lock:
             counters = dict(self._counters)
             counters["active"] = counters.get("running", 0)
-            counters["queued"] = max(0, counters.get("admitted", 0) - counters["active"])
+            counters["queued"] = counters.get("queued", 0)
+            counters["cache_hits"] = counters.get("cache_result", 0) + counters.get("cache_trace", 0)
             values = sorted(self._durations_ms)
 
             def percentile(p):
@@ -106,18 +108,26 @@ def _submit(work):
     if not _admission.acquire(blocking=False):
         raise AdmissionError("worker queue is full")
     _metrics.inc("admitted")
+    _metrics.inc("queued")
     submitted = time.perf_counter_ns()
 
     def job():
+        _metrics.dec("queued")
         _metrics.inc("running")
         try:
             return work()
         finally:
             _metrics.dec("running")
+            _metrics.inc("finished")
             _metrics.observe_ms((time.perf_counter_ns() - submitted) / 1e6)
             _admission.release()
 
-    return _executor.submit(job)
+    try:
+        return _executor.submit(job)
+    except Exception:
+        _metrics.dec("queued")
+        _admission.release()
+        raise
 
 
 def ensure_generated():
@@ -284,14 +294,21 @@ def run(request, context):
     if remaining is not None and remaining <= 0:
         _metrics.inc("deadline_exceeded")
         context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
+    deadline = None if remaining is None else time.monotonic() + remaining
+
+    def work():
+        job_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        return _run_impl(request, job_timeout)
+
     try:
-        future = _submit(lambda: _run_impl(request, remaining))
+        future = _submit(work)
     except AdmissionError as error:
         _metrics.inc("rejected_full")
         context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
     try:
         return future.result(timeout=remaining)
     except Exception as error:  # noqa: BLE001 - mapped to a gRPC status below
+        future.cancel()
         _map_job_error(context, error)
 
 
@@ -305,13 +322,15 @@ def run_batch(request, context):
         _metrics.inc("deadline_exceeded")
         context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
 
+    deadline = None if remaining is None else time.monotonic() + remaining
+
     def work():
         responses = []
         for item in request.requests:
-            item_remaining = context.time_remaining()
-            if item_remaining is not None and item_remaining <= 0:
+            item_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if item_timeout is not None and item_timeout <= 0:
                 raise TimeoutError("deadline exceeded")
-            responses.append(_run_impl(item, item_remaining))
+            responses.append(_run_impl(item, item_timeout))
         return pb.RunBatchResponse(responses=responses)
 
     try:
@@ -322,6 +341,7 @@ def run_batch(request, context):
     try:
         return future.result(timeout=remaining)
     except Exception as error:  # noqa: BLE001 - mapped to a gRPC status below
+        future.cancel()
         _map_job_error(context, error)
 
 
@@ -490,15 +510,36 @@ def main(argv=None):
         server = serve(
             args.listen,
             allow_remote=args.allow_remote,
-            workers=args.max_concurrent + args.queue_depth + 4,
+            workers=min(64, args.max_concurrent + args.queue_depth + 4),
         )
     except ValueError as error:
         parser.error(str(error))
     except TraceError as error:
         parser.error(str(error))
 
+    socket_path = None
+    for prefix in ("unix://", "unix:"):
+        if args.listen.startswith(prefix):
+            socket_path = args.listen[len(prefix) :]
+            break
+
     def handle_shutdown(signum, frame):
-        server.stop(grace=args.shutdown_grace).wait()
+        # Stop accepting immediately, cancel queued work, terminate in-flight
+        # QEMU/amperesys children, then wait at most shutdown-grace for the
+        # worker threads to unwind.
+        server.stop(grace=0)
+        terminate_all(min(2.0, args.shutdown_grace))
+        if _executor is not None:
+            _executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + args.shutdown_grace
+        while time.monotonic() < deadline:
+            counters, _ = _metrics.snapshot()
+            if counters.get("active", 0) == 0:
+                break
+            time.sleep(0.05)
+        if socket_path:
+            Path(socket_path).unlink(missing_ok=True)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -506,10 +547,10 @@ def main(argv=None):
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
-        server.stop(grace=args.shutdown_grace).wait()
+        handle_shutdown(None, None)
     finally:
         if _executor is not None:
-            _executor.shutdown(wait=True, cancel_futures=False)
+            _executor.shutdown(wait=False, cancel_futures=True)
     return 0
 
 

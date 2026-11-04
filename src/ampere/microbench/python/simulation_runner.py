@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from process_registry import register_child, unregister_child
+
 COMPLETED = re.compile(r"Panthera completed\s*:\s*([\d,]+) cycles,\s*([\d,]+) instructions")
 MEASURED = re.compile(r"Simulator measurement\s*:\s*([\d,]+) cycles,\s*([\d,]+) instructions,\s*([\d.]+) IPC")
 
@@ -96,22 +98,30 @@ class SimulationRunner:
             raise TimeoutError("deadline exceeded before simulation")
         started = time.perf_counter_ns()
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=effective_timeout,
             )
-        except subprocess.TimeoutExpired as error:
-            raise TimeoutError(f"amperesys timed out after {effective_timeout:.1f}s") from error
         except OSError as error:
             raise SimulationError(f"failed to run amperesys: {error}") from error
+        register_child(process.pid)
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=effective_timeout)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise TimeoutError(f"amperesys timed out after {effective_timeout:.1f}s") from error
+        finally:
+            unregister_child(process.pid)
         wall_ns = time.perf_counter_ns() - started
-        output = result.stdout + result.stderr
+        output = (stdout or "") + (stderr or "")
 
-        if result.returncode != 0:
+        if process.returncode != 0:
             tail = output.strip().splitlines()[-1] if output.strip() else ""
-            raise SimulationError(f"amperesys failed (exit {result.returncode}): {tail[:300]}")
+            raise SimulationError(f"amperesys failed (exit {process.returncode}): {tail[:300]}")
 
         cycles, instructions, ipc = parse_metrics(output)
         return SimulationResult(

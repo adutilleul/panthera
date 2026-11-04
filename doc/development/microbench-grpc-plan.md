@@ -702,14 +702,19 @@ Result:
   hang is isolated from the server. Python job exceptions map to
   `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `DEADLINE_EXCEEDED`, or
   `INTERNAL`; a worker thread is not killed.
-- Graceful shutdown on SIGTERM/SIGINT: stop accepting, drain for
-  `--shutdown-grace` seconds, shut down the executor, remove the socket.
+- Graceful shutdown on SIGTERM/SIGINT: stop accepting, terminate in-flight
+  QEMU/`amperesys` children, cancel queued jobs, wait up to
+  `--shutdown-grace`, remove the socket, and exit. A 1M-instruction request
+  was cut short and the server exited in ~105 ms with `--shutdown-grace 2`.
 - `Stats` RPC (and `microbench_client.py --stats`): counters for requests,
-  admitted/running/queued, cache result/trace/miss, trace/sim runs,
-  rejections, deadlines, and errors, plus p50/p95 request latency.
+  admitted/running/queued/finished, cache result/trace/miss/hits, trace/sim
+  runs, rejections, deadlines, and errors, plus p50/p95 request latency.
+- Deadlines are absolute across the queue: queued jobs are cancelled, and the
+  QEMU/`amperesys` subprocess timeouts are derived from the remaining
+  deadline. Trace-generation timeouts now map to `DEADLINE_EXCEEDED`.
 - Stress check: 6 concurrent requests with 2 workers + 2 queue slots produced
-  4 successes and 2 `RESOURCE_EXHAUSTED`; stats were consistent and SIGTERM
-  exited 0.
+  4 successes and 2 `RESOURCE_EXHAUSTED`; after completion `queued=0`,
+  `finished=4`; SIGTERM exited 0.
 - Tests: worker-pool admission/result and metrics/Stats tests; 35 total.
 
 Scope: trace/simulation workers. The C++ server's process model remains
@@ -731,7 +736,8 @@ Subagent: execution subagent runs a stress test; review subagent checks fd and
 process lifecycle.
 
 Files: `microbench_server.py`, `microbench_client.py`,
-`test_worker_pool.py`, `proto/microbench.proto`, `README.md`.
+`process_registry.py`, `test_worker_pool.py`, `proto/microbench.proto`,
+`README.md`.
 
 #### Step 1.6 — (Candidate) fork-after-elaboration worker
 

@@ -21,6 +21,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from process_registry import register_child, unregister_child
+
 # The harness places the user code at this address. The `_start` prologue is
 # below it and the code is followed by a self-loop.
 CODE_BASE = 0x400000
@@ -244,32 +246,43 @@ class QemuTraceSource:
         effective_timeout = min(self.timeout_s, timeout_s) if timeout_s is not None else self.timeout_s
         deadline = time.monotonic() + effective_timeout
         process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        register_child(process.pid)
         finalized = False
-        while time.monotonic() < deadline:
-            # The tracer removes <trace>.tmp only after the final stream has
-            # been copied and finalized, so its absence is the completion
-            # signal. The "Stopping tracing" log line is printed before that
-            # copy and is not sufficient for large traces.
-            if trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
+        try:
+            while time.monotonic() < deadline:
+                # The tracer removes <trace>.tmp only after the final stream
+                # has been copied and finalized, so its absence is the
+                # completion signal. The "Stopping tracing" log line is
+                # printed before that copy and is not sufficient for large
+                # traces.
+                if trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
+                    finalized = True
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.02)
+
+            if not finalized and trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
                 finalized = True
-                break
-            if process.poll() is not None:
-                break
-            time.sleep(0.02)
 
-        if not finalized and trace_path.exists() and trace_path.stat().st_size > 0 and not tmp_path.exists():
-            finalized = True
-
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            timed_out = not finalized and process.poll() is None
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        finally:
+            unregister_child(process.pid)
         log = log_path.read_text(errors="replace") if log_path.exists() else ""
 
         if not finalized:
+            if timed_out:
+                raise TimeoutError(
+                    f"QEMU trace did not finalize within {effective_timeout:.1f}s "
+                    f"(tmp_present={tmp_path.exists()}, log={log.strip()[-300:]})"
+                )
             raise TraceError(
                 f"QEMU trace did not finalize within {effective_timeout:.1f}s "
                 f"(tmp_present={tmp_path.exists()}, log={log.strip()[-300:]})"
