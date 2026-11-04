@@ -5,11 +5,15 @@
 
 import hashlib
 import os
+import struct
+import tempfile
 import unittest
+from pathlib import Path
 
 from qemu_trace_source import (
     CODE_BASE,
     CODE_ENTRY,
+    FLAT_TABLE_PA,
     QemuTraceSource,
     TraceError,
     _harness_assembly,
@@ -48,6 +52,20 @@ sysreg count = 0"""
         self.assertEqual(info["memory_events"], 54)
 
 
+class FlatPageTableTest(unittest.TestCase):
+    def test_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "bench_0.is.xz"
+            trace.write_bytes(b"trace")
+            mem = QemuTraceSource._write_flat_page_table(trace)
+            data = mem.read_bytes()
+            self.assertEqual(len(data), 12 + 4096)
+            address, size = struct.unpack("<QI", data[:12])
+            self.assertEqual(address, FLAT_TABLE_PA)
+            self.assertEqual(size, 4096)
+            self.assertEqual(struct.unpack("<Q", data[12:20])[0], 0x401)
+
+
 class MissingToolsTest(unittest.TestCase):
     def test_missing_paths(self):
         with self.assertRaises(TraceError):
@@ -67,6 +85,8 @@ class IntegrationTest(unittest.TestCase):
         result = source.run(code, 1, name="unittest")
         self.assertGreaterEqual(result.measurement, 1)
         self.assertEqual(result.code_sha256, hashlib.sha256(code).hexdigest())
+        self.assertTrue(result.mem_path.exists())
+        self.assertEqual(result.mem_path.stat().st_size, 12 + 4096)
 
 
 if __name__ == "__main__":

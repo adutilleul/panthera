@@ -64,8 +64,22 @@ The harness places the code at `0x400100` after a small `_start` prologue that
 zeroes `x0`–`x29`, sets a fixed BSS stack, and exits after the code returns; a
 self-loop follows in case the benchmark falls through. The trace source waits
 for the tracer to remove `<trace>.tmp` (the finalization signal), then
-terminates QEMU and validates the trace with `is_info`. Identical code requests produce
-byte-identical `.is.xz` files; flat traces omit process-specific sysregs.
+terminates QEMU and validates the trace with `is_info`. Identical code requests
+produce byte-identical `.is.xz` and `.mem` files; flat traces omit
+process-specific sysregs and emit fixed synthetic TCR/TTBR.
+
+The source also writes `<trace>.mem`, a flat level-1 page table mapping VA
+0–1 GiB to PA 0–1 GiB. The trace and `.mem` are directly consumable by
+`amperesys`:
+
+```sh
+amperesys -cfg <panthera-root>/install/config/model/sys/siryn.cfg \
+  -sys.soc_0.core_0.instruction_stream_name <trace>_0.is.xz \
+  -sys.soc_0.core_0.gpc.max_instructions 1000
+```
+
+The server still returns `cycles=0`; running the simulator from the server is
+Step 3.2.
 
 ## Tests
 

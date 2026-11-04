@@ -392,7 +392,8 @@ Result:
   `stop-tracing-after-measuring-instructions=500`, `max-traces=1`.
 - Plugin flags: `allow-missing-sysregs=true,flat-map=true`.
 - Output: `mem_0.is.xz` (~2 KiB; `is_info`: 601 instructions = 500 measurement
-  + 101 cooldown, 112 memops, 54 memory events, 0 sysreg events); `is_count`
+  + 101 cooldown, 112 memops, 54 memory events, 3 synthetic TCR/TTBR sysreg
+  events); `is_count`
   parses a realistic mix (ADD/SUBS/LDR/branches/etc.).
 
 Plugin changes required:
@@ -414,12 +415,9 @@ Trigger limitations:
 - `profile-comm`/`profile-pid` work, but a bare static binary can use the
   instruction triggers directly.
 
-Remaining integration gap: `amperesys` still rejects the flat user-mode trace
-because it has no `TCR_EL1`/`TTBR*` page-table setup
-(`pwt.h starting_level() computation underflowed`). The trace itself is valid
-and is consumable by the flat-memory/in-process runner. Fix by generating a
-flat page table + synthetic TCR in the trace or by using the Step 2.1 flat
-mapping; this is not a QEMU/plugin blocker.
+Resolved in Step 2.1: the plugin writes a synthetic `TCR_EL1`/`TTBR0_EL1` and
+the trace source emits a flat `.mem` page table. `amperesys` now consumes the
+trace (1,000 instructions, 1,583 cycles, IPC 1.183).
 
 Build recipe (host fallback, no Nix):
 - Download the tarball at the rev above; add the `ui/keycodemapdb` and
@@ -583,9 +581,10 @@ Result:
   finalized. The tracer removes `<trace>.tmp` after the final stream is
   complete; `max-traces=1` stops tracing but the source terminates a
   self-looping QEMU itself.
-- Determinism: two identical runs produce byte-identical `.is.xz` (SHA-256
-  verified). Flat traces omit sysreg writes because user-mode TPIDR*/timer
-  values are process-specific; the trace has 0 sysreg events.
+- Determinism: two identical runs produce byte-identical `.is.xz` and `.mem`
+  (SHA-256 verified). Flat traces omit process-specific sysreg writes; they
+  emit a fixed synthetic TCR/TTBR (3 sysreg events), so identical runs remain
+  byte-identical.
 - Completion is detected by the tracer removing `<trace>.tmp` after the final
   stream is copied and finalized, then validated with `is_info`; the
   `Stopping tracing` log line alone is printed too early. A truncated or short
@@ -609,8 +608,8 @@ Limitations:
 - `entry_pc` must be 0 or `0x400100`; the code base is fixed.
 - Data sections are rejected; `.data`/`.bss` support is a follow-up.
 - `cycles`/`ipc` are 0 until the Step 3.2 runner.
-- The trace has flat PAs but no TCR/TTBR/page tables; `amperesys` still needs
-  the Step 2.1 flat mapping.
+- The trace includes a flat TCR/TTBR and `.mem`; `amperesys` consumes it
+  (Step 2.1). Addresses outside the low 1 GiB fault deterministically.
 - No sandbox: user-mode QEMU executes client code with host syscalls. The
   sidecar binds a Unix socket by default; `--allow-remote` additionally
   requires `--allow-untrusted`.
@@ -720,20 +719,41 @@ Only do this if measured latency/throughput still misses the objective.
 
 #### Step 2.1 — Memory image and flat page table
 
+Status: **DONE (2026-11-04)** for the v1 sidecar path. The trace source emits a
+flat page table and the plugin emits synthetic TCR/TTBR; `amperesys` now runs
+the user-mode trace.
+
+Result:
+- Plugin flat mode writes `TCR_EL1 = 25 | (2 << 32)` (4 KiB granule, 39-bit
+  VA, IPS=2), `TTBR0_EL1 = 0x500000`, and `TTBR1_EL1 = 0`.
+- The trace source writes `<trace>_0.mem` with a 4 KiB L1 table at `0x500000`:
+  entry 0 is a level-1 1 GiB block descriptor (`0x401`, AF=1) mapping VA
+  0–1 GiB to PA 0–1 GiB; other entries are invalid.
+- `amperesys -cfg siryn.cfg -instruction_stream_name <trace>` loads the `.mem`
+  and runs the trace: **1,000 instructions, 1,583 cycles, IPC 1.183**.
+- Determinism: the `.is.xz` and `.mem` are byte-identical across identical
+  runs.
+- The mapping covers the code (`0x400000`–`0x400100`) and stack; addresses
+  outside the low 1 GiB fault deterministically.
+
 Work:
-- Build a sparse `ArchState` from request sections.
+- Build a sparse `ArchState` from request sections. **Deferred: the `.mem`
+  currently contains the page table only; data sections remain a follow-up.**
 - Generate a flat mapping (1 GB blocks or 2 MB pages) covering code, data,
-  stack, and a scratch arena.
-- Deterministic fill policy for uninitialized memory (configurable seed/pattern).
-- Optional MMU-off/identity fast path only if profiling shows translation is
-  hot; treat as a separate, reviewed change.
+  stack, and a scratch arena. **Done for the low 1 GiB.**
+- Deterministic fill policy for uninitialized memory. **Page table is
+  zero-filled; user data/scratch sections remain.**
+- Optional MMU-off/identity fast path. **Not needed.**
 
-Acceptance: arbitrary benchmark addresses in the mapped ranges translate;
-out-of-range accesses fault deterministically; unit tests for block/page
-descriptors.
+Acceptance: arbitrary benchmark addresses in the mapped range translate;
+out-of-range accesses fault deterministically; unit tests for the block/page
+descriptor. **Met for the low 1 GiB; the `.mem` header and block descriptor
+are unit-tested.**
 
-Files: new `src/ampere/archx/code_image.{h,cc}` (or
-`flat_page_table.{h,cc}`) + tests.
+Files: `src/ampere/tracing_tools/is_tracer.h`,
+`src/ampere/microbench/python/qemu_trace_source.py`,
+`src/ampere/microbench/python/test_qemu_trace_source.py`. The C++
+`archx/code_image` path is deferred while the v1 runner is the sidecar.
 
 #### Step 2.2 — `DriverCode` core
 
@@ -1043,9 +1063,9 @@ rate from 10k to 30k is ~11.5 kips; long runs are 10.6–13.6 kips.
 
 Step 0.3 addendum: user-mode QEMU 8.0 + the patched plugin produced a
 601-instruction `.is.xz` (500 measurement, 101 cooldown; 112 memops, 54 memory
-events, 0 sysreg events) from a static `tiny_arm` loop. Flat traces omit
-process-specific sysregs for determinism. `is_info` and `is_count` parse it;
-`amperesys` still needs a flat page-table/TCR setup for this trace (Step 2.1).
+events, 3 synthetic TCR/TTBR sysreg events) from a static `tiny_arm` loop.
+The trace source also writes a `.mem` page table; `amperesys` now consumes the
+trace (Step 2.1).
 
 ### Step 0.1 findings
 

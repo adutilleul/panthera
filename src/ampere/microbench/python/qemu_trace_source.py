@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -24,6 +25,12 @@ from pathlib import Path
 # below it and the code is followed by a self-loop.
 CODE_BASE = 0x400000
 CODE_ENTRY = 0x400100
+
+# Flat stage-1 mapping: 4 KiB granule, 39-bit VA, one level-1 1 GiB block at
+# VA/PA 0. These values must match the synthetic TCR/TTBR written by the
+# plugin's flat mode.
+FLAT_TABLE_PA = 0x500000
+FLAT_TCR_EL1 = 25 | (2 << 32)  # T0SZ=25, IPS=2
 
 
 class TraceError(RuntimeError):
@@ -42,6 +49,7 @@ class TraceResult:
     sysreg_events: int
     generation_ns: int
     code_sha256: str
+    mem_path: Path | None
     log: str
 
     def summary(self) -> str:
@@ -49,7 +57,8 @@ class TraceResult:
             f"trace={self.path} code={self.code_sha256[:16]} "
             f"instructions={self.instructions} "
             f"(measurement={self.measurement}, cooldown={self.cooldown}) "
-            f"memops={self.memops} memory={self.memory_events} sysregs={self.sysreg_events}"
+            f"memops={self.memops} memory={self.memory_events} sysregs={self.sysreg_events} "
+            f"mem={self.mem_path}"
         )
 
 
@@ -172,6 +181,18 @@ class QemuTraceSource:
             time.sleep(0.1)
         raise TraceError(f"is_info rejected the trace: {last_error[:300]}")
 
+    @staticmethod
+    def _write_flat_page_table(trace_path: Path) -> Path:
+        """Write the `.mem` image for the synthetic flat mapping."""
+        mem_path = trace_path.with_name(trace_path.name.replace(".is.xz", ".mem"))
+        # Level-1 block descriptor: valid, AF=1, output address 0 (identity).
+        entry = 1 | (1 << 10)
+        table = struct.pack("<Q", entry) + b"\x00" * (4096 - 8)
+        with mem_path.open("wb") as stream:
+            stream.write(struct.pack("<QI", FLAT_TABLE_PA, len(table)))
+            stream.write(table)
+        return mem_path
+
     def run(
         self,
         code: bytes,
@@ -258,6 +279,7 @@ class QemuTraceSource:
         info = self._run_is_info(trace_path)
         if info["measurement"] < max_instructions:
             raise TraceError(f"incomplete trace: measurement={info['measurement']} < requested={max_instructions}")
+        mem_path = self._write_flat_page_table(trace_path)
         generation_ns = time.perf_counter_ns() - started
 
         if not self.keep_intermediates:
@@ -275,5 +297,6 @@ class QemuTraceSource:
             sysreg_events=info["sysreg_events"],
             generation_ns=generation_ns,
             code_sha256=code_sha,
+            mem_path=mem_path,
             log=log,
         )
