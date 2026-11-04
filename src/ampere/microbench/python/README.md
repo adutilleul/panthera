@@ -1,8 +1,9 @@
 # Microbenchmark gRPC sidecar
 
-Status: Step 1.3 trace source. `Run` now wraps the submitted AArch64 words in a
-static harness ELF and generates a user-mode QEMU instruction trace. The
-simulator runner is still Step 3.2, so `cycles`/`ipc` are 0 for now.
+Status: Step 1.3 trace source plus the Step 3.2 v1 subprocess runner. `Run`
+wraps the submitted AArch64 words in a static harness ELF, generates a
+user-mode QEMU instruction trace, and (when configured) runs `amperesys` to
+return real `cycles`/`ipc`.
 
 ## Why a Python sidecar
 
@@ -100,7 +101,8 @@ The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,
 
 ## Not yet
 
-- No simulation: `cycles` and `ipc` are 0 until the runner is wired in.
+- No in-process simulation: the v1 runner starts a subprocess `amperesys` per
+  request, so its ~1.4 s startup dominates very small benchmarks.
 - No data sections (`.data`/`.bss` at request-specified addresses).
 - `RunBatch` is implemented server-side but has no client flag yet.
 - No sandbox, authentication, or per-request memory limits beyond the code

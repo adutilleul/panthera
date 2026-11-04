@@ -92,7 +92,9 @@ def _run_impl(request, timeout_s=None):
     if _simulation_runner is not None:
         remaining = None
         if timeout_s is not None:
-            remaining = max(0.1, timeout_s - (time.monotonic() - started))
+            remaining = timeout_s - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError("deadline exceeded before simulation")
         simulation = _simulation_runner.run(
             result.path,
             request.max_instructions,
@@ -129,6 +131,8 @@ def run(request, context):
         return _run_impl(request, remaining)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+    except TimeoutError as error:
+        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
     except (TraceError, SimulationError) as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
     finally:
@@ -150,6 +154,8 @@ def run_batch(request, context):
         return pb.RunBatchResponse(responses=responses)
     except ValueError as error:
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+    except TimeoutError as error:
+        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
     except (TraceError, SimulationError) as error:
         context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
     finally:

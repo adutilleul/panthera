@@ -34,7 +34,7 @@ milliseconds" target was based on a wrong assumption about trace generation.
 |---|---:|---:|---:|
 | Result-cache hit p50 | <= 5 ms | <= 5 ms | <= 5 ms |
 | Simulate path (no QEMU), p50 | ~2.9 s | ~11.5 s | ~77 s |
-| Cold request (QEMU + simulation) p50 | ~1.9 s | ~7.3 s | — |
+| Cold request (QEMU + simulation), indicative | ~1.9 s | ~7.3 s | — |
 | Throughput per worker | ~0.35 req/s | ~0.09 req/s | ~0.013 req/s |
 
 Basis: 10k/30k rates measured on `domino.cfg` (~9.5–11 kips); long-trace rates
@@ -703,13 +703,12 @@ make it sub-second on its own.
 Subagent: execution subagent runs the fork/A-B comparison; review subagent
 checks state isolation and zombie/fd handling.
 
-**Gate 1:** the revised targets in section 1 are met: result-cache hit
-<= 5 ms, simulate path within the stated times, and QEMU absent on a hit. The
-cold path is now measured through the Step 3.2 subprocess shim: 10k = 1.89 s,
-100k = 7.33 s. The result cache (Step 1.2) is not implemented yet, so Gate 1 is
-not final. Do not finalize the phase-2 deferral until at least one cold QEMU
-request has been measured (done) and the result-cache hit path is measured.
-If the targets are met, phase 2 can be deferred.
+**Gate 1:** the cold path is now measured through the Step 3.2 subprocess
+shim: 10k = 1.89 s, 100k = 7.33 s (2 reps, indicative rather than p50). The
+result cache (Step 1.2) is not implemented, so the result-cache hit target is
+not met yet and Gate 1 is not final. Do not finalize the phase-2 deferral until
+the result-cache hit path is measured. If the targets are met, phase 2 can be
+deferred.
 
 ---
 

@@ -4,7 +4,11 @@
 """Unit and optional integration tests for the amperesys subprocess runner."""
 
 import os
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from qemu_trace_source import QemuTraceSource
 from simulation_runner import SimulationError, SimulationRunner, parse_metrics
@@ -32,10 +36,60 @@ class ParseMetricsTest(unittest.TestCase):
             parse_metrics("no metrics here")
 
 
+class RunnerTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        directory = Path(self.temp.name)
+        self.config = directory / "test.cfg"
+        self.config.write_text("")
+        self.trace = directory / "bench_0.is.xz"
+        self.trace.write_bytes(b"trace")
+        self.runner = SimulationRunner(amperesys="/bin/true", config=self.config)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_command_and_metrics(self):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=" Simulator measurement : 10 cycles, 5 instructions, 2.000 IPC",
+            stderr="",
+        )
+        with mock.patch("simulation_runner.subprocess.run", return_value=completed) as run:
+            result = self.runner.run(self.trace, 1000)
+        command = run.call_args.args[0]
+        self.assertIn("1000", command)
+        self.assertIn("-max_time", command)
+        self.assertEqual((result.cycles, result.instructions, result.ipc), (10, 5, 2.0))
+
+    def test_nonzero_exit(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+        with mock.patch("simulation_runner.subprocess.run", return_value=completed):
+            with self.assertRaises(SimulationError):
+                self.runner.run(self.trace, 1)
+
+    def test_timeout(self):
+        with mock.patch(
+            "simulation_runner.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="amperesys", timeout=1),
+        ):
+            with self.assertRaises(TimeoutError):
+                self.runner.run(self.trace, 1)
+
+    def test_missing_trace(self):
+        with self.assertRaises(SimulationError):
+            self.runner.run("/does/not/exist.is.xz", 1)
+
+
 class MissingToolsTest(unittest.TestCase):
-    def test_missing_paths(self):
+    def test_missing_binary(self):
         with self.assertRaises(SimulationError):
             SimulationRunner(amperesys="/does/not/exist", config="/does/not/exist")
+
+    def test_missing_config(self):
+        with self.assertRaises(SimulationError):
+            SimulationRunner(amperesys="/bin/true", config="/does/not/exist")
 
 
 @unittest.skipUnless(all(os.environ.get(name) for name in _SIM_ENV), "set all PANTHERA_* runner env vars")

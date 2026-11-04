@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Run amperesys on a generated trace and parse its metrics.
 
-This is the v1 subprocess runner for the Python sidecar. Step 3.2 replaces it
-with an in-process `SimulationRunner` when the C++ server is available.
+This is the v1 subprocess runner for the Python sidecar; the C++ in-process
+runner is deferred.
 """
 
 import os
@@ -89,9 +89,11 @@ class SimulationRunner:
             "-sys.soc_0.core_0.gpc.max_instructions",
             str(max_instructions),
             "-max_time",
-            "100ms",
+            "1s",
         ]
         effective_timeout = min(self.timeout_s, timeout_s) if timeout_s else self.timeout_s
+        if effective_timeout <= 0:
+            raise TimeoutError("deadline exceeded before simulation")
         started = time.perf_counter_ns()
         try:
             result = subprocess.run(
@@ -101,7 +103,7 @@ class SimulationRunner:
                 timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired as error:
-            raise SimulationError(f"amperesys timed out after {effective_timeout:.1f}s") from error
+            raise TimeoutError(f"amperesys timed out after {effective_timeout:.1f}s") from error
         except OSError as error:
             raise SimulationError(f"failed to run amperesys: {error}") from error
         wall_ns = time.perf_counter_ns() - started
