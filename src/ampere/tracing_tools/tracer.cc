@@ -55,8 +55,13 @@ std::unique_ptr<Tracer> Tracer::make_tracer(const Tracer::Type type,
                                            elf_section_span,
                                            debug);
     case Tracer::Type::IS:
-        return std::make_unique<ISTracer>(
-            fmt::format("{}.is.xz", filename_base), sysregs, el, stateaccessor, debug, record_destination_registers);
+        return std::make_unique<ISTracer>(fmt::format("{}.is.xz", filename_base),
+                                          sysregs,
+                                          el,
+                                          stateaccessor,
+                                          flat_map,
+                                          debug,
+                                          record_destination_registers);
     case Tracer::Type::MS:
         return std::make_unique<MSTracer>(
             fmt::format("{}.ms.xz", filename_base), sysregs, stateaccessor, dcache_size_bytes, icache_size_bytes);

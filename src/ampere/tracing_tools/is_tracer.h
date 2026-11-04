@@ -26,12 +26,14 @@ public:
     ISTracer(const std::string filename,
              const std::map<archx::SysReg, uint64_t> sysregs,
              const archx::EL el,
-             StateAccessor *stateaccessor,
+             StateAccessor* stateaccessor,
+             bool flat_map,
              bool debug,
              bool record_destination_registers)
         : filename(filename),
           tmp_filename(fmt::format("{}.tmp", filename)),
           stateaccessor{stateaccessor},
+          flat_map{flat_map},
           debug_mode{debug},
           record_dst_registers{record_destination_registers},
           first_instruction{true}
@@ -52,7 +54,7 @@ public:
         writer = new is::InstructionStreamWriter(tmp_filename, stream_features);
         assert(writer);
 
-        for (const auto &[sysreg, value] : sysregs)
+        for (const auto& [sysreg, value] : sysregs)
             sysreg_write(sysreg, value);
         el_change(el, ContextUpdateType::TRACING);
     }
@@ -94,13 +96,13 @@ public:
                       << " unaccounted-for writes while recording uninitialized loads." << std::endl;
 
         // First, write memory values for all uninitialized_loads
-        for (const auto &[pa, val_size] : uninitialized_loads) {
+        for (const auto& [pa, val_size] : uninitialized_loads) {
             is::Event event;
             is::Memory memory;
             memory.mutable_address()->set_pa(pa.value());
             uint64_t val = val_size.first;
             size_t size = val_size.second;
-            memory.set_value((char *)&val, size);
+            memory.set_value((char*)&val, size);
             event.mutable_memory()->CopyFrom(memory);
             writer->write(event);
         }
@@ -127,7 +129,7 @@ public:
     {
         try {
             writer->finalize();
-        } catch (std::exception &e) {
+        } catch (std::exception& e) {
             log("ISTracer caught exception '%s' while finalizing instruction stream\n", e.what());
         }
         delete writer;
@@ -206,9 +208,9 @@ public:
         auto maybe_gprs = stateaccessor->read_gp_registers();
         if (maybe_gprs) {
             gpr_map_t gprs = maybe_gprs.value();
-            for (const auto &[reg, value] : gprs) {
+            for (const auto& [reg, value] : gprs) {
                 if (reg != 32) { // reg==32 is the PC and we do not want to store that with the GPRs
-                    is::Register *is_reg = first_is_instr.add_register_();
+                    is::Register* is_reg = first_is_instr.add_register_();
                     is_reg->set_number(reg);
                     is_reg->set_value(value);
                     last_gprs[reg] = value;
@@ -219,11 +221,11 @@ public:
         auto maybe_vfprs = stateaccessor->read_vfp_registers();
         if (maybe_vfprs) {
             vec_map_t vfprs = maybe_vfprs.value();
-            for (const auto &[reg, value] : vfprs) {
-                is::VFPRegister *is_reg = first_is_instr.add_vfp_register();
+            for (const auto& [reg, value] : vfprs) {
+                is::VFPRegister* is_reg = first_is_instr.add_vfp_register();
                 is_reg->set_number(reg);
-                is_reg->set_ls_value(*((uint64_t *)value.data()));
-                is_reg->set_ms_value(*((uint64_t *)(value.data() + 8)));
+                is_reg->set_ls_value(*((uint64_t*)value.data()));
+                is_reg->set_ms_value(*((uint64_t*)(value.data() + 8)));
                 last_vfprs[reg] = value;
             }
         }
@@ -231,8 +233,8 @@ public:
         auto maybe_predregs = stateaccessor->read_pred_registers();
         if (maybe_predregs) {
             pred_map_t predregs = maybe_predregs.value();
-            for (const auto &[reg, value] : predregs) {
-                is::PredRegister *is_reg = first_is_instr.add_src_pred_register();
+            for (const auto& [reg, value] : predregs) {
+                is::PredRegister* is_reg = first_is_instr.add_src_pred_register();
                 is_reg->set_number(reg);
                 is_reg->set_value(value);
                 last_predregs[reg] = value;
@@ -247,11 +249,12 @@ public:
         }
     }
 
-    virtual bool instruction_exec(const Instruction &instruction, const ProgramCounter next_pc) override
+    virtual bool instruction_exec(const Instruction& instruction, const ProgramCounter next_pc) override
     {
         /* translate instruction and data VAs to PAs, updating
          * translation-related state */
-        handle_translations(instruction);
+        if (!flat_map)
+            handle_translations(instruction);
 
         // Convert the tracer instruction to an is::Instruction
         is::Instruction is_instr;
@@ -259,14 +262,18 @@ public:
             is_instr = first_is_instr; // contains initial state
         }
         is_instr.mutable_program_counter()->set_va(instruction.pc.value());
-        if (instruction.pa)
+        if (flat_map)
+            is_instr.mutable_program_counter()->set_pa(instruction.pc.value());
+        else if (instruction.pa)
             is_instr.mutable_program_counter()->set_pa(instruction.pa.value().value());
         is_instr.set_opcode(instruction.opcode);
 
-        for (const auto &memop : instruction.memops) {
-            is::MemOp *is_memop = is_instr.add_memop();
+        for (const auto& memop : instruction.memops) {
+            is::MemOp* is_memop = is_instr.add_memop();
             is_memop->set_va(memop.va.value());
-            if (memop.pa)
+            if (flat_map)
+                is_memop->set_pa(memop.va.value());
+            else if (memop.pa)
                 is_memop->set_pa(memop.pa.value().value());
             if (memop.predicated_off)
                 is_memop->set_predicated_off(true);
@@ -281,24 +288,24 @@ public:
         // for TLBI, cache maintenance, divide, and prefetch instructions, so
         // we know we want to pass them all through. One day, we may want to
         // add checks like `if (IS_TLBI(instruction.opcode))`
-        for (const auto &[reg, value] : instruction.source_regs) {
+        for (const auto& [reg, value] : instruction.source_regs) {
             if (reg == 32) { // ignore changes to the PC
                 continue;
             }
-            is::Register *is_reg = is_instr.add_register_();
+            is::Register* is_reg = is_instr.add_register_();
             is_reg->set_number(reg);
             is_reg->set_value(value);
         }
 
-        for (const auto &[reg, value] : instruction.source_vfp_regs) {
-            is::VFPRegister *is_reg = is_instr.add_vfp_register();
+        for (const auto& [reg, value] : instruction.source_vfp_regs) {
+            is::VFPRegister* is_reg = is_instr.add_vfp_register();
             is_reg->set_number(reg);
-            is_reg->set_ls_value(*((uint64_t *)value.data()));
-            is_reg->set_ms_value(*((uint64_t *)(value.data() + 8)));
+            is_reg->set_ls_value(*((uint64_t*)value.data()));
+            is_reg->set_ms_value(*((uint64_t*)(value.data() + 8)));
         }
 
-        for (const auto &[reg, value] : instruction.source_pred_regs) {
-            is::PredRegister *is_reg = is_instr.add_src_pred_register();
+        for (const auto& [reg, value] : instruction.source_pred_regs) {
+            is::PredRegister* is_reg = is_instr.add_src_pred_register();
             is_reg->set_number(reg);
             is_reg->set_value(value);
         }
@@ -324,7 +331,7 @@ public:
             }
 
             uint64_t effective_sp_val{0};
-            for (const auto &[reg, value] : gprs) {
+            for (const auto& [reg, value] : gprs) {
                 // Save off gpr sp value because it can be invalid around EL change boundaries
                 if (reg == 31) {
                     effective_sp_val = value;
@@ -334,7 +341,7 @@ public:
                 if (reg == 32)
                     continue;
                 if (value != last_gprs[reg]) {
-                    is::Register *is_reg = is_instr.add_dst_register();
+                    is::Register* is_reg = is_instr.add_dst_register();
                     is_reg->set_number(reg);
                     is_reg->set_value(value);
                     last_gprs[reg] = value;
@@ -352,24 +359,24 @@ public:
             }
 
             if (effective_sp_val != last_gprs[31]) {
-                is::Register *is_reg = is_instr.add_dst_register();
+                is::Register* is_reg = is_instr.add_dst_register();
                 is_reg->set_number(31);
                 is_reg->set_value(effective_sp_val);
                 last_gprs[31] = effective_sp_val;
             }
 
-            for (const auto &[reg, value] : vfprs) {
+            for (const auto& [reg, value] : vfprs) {
                 if (value != last_vfprs[reg]) {
-                    is::VFPRegister *is_reg = is_instr.add_dst_vfp_register();
+                    is::VFPRegister* is_reg = is_instr.add_dst_vfp_register();
                     is_reg->set_number(reg);
-                    is_reg->set_ls_value(*((uint64_t *)value.data()));
-                    is_reg->set_ms_value(*((uint64_t *)(value.data() + 8)));
+                    is_reg->set_ls_value(*((uint64_t*)value.data()));
+                    is_reg->set_ms_value(*((uint64_t*)(value.data() + 8)));
                     last_vfprs[reg] = value;
                 }
             }
-            for (const auto &[reg, value] : predregs) {
+            for (const auto& [reg, value] : predregs) {
                 if (value != last_predregs[reg]) {
-                    is::PredRegister *is_reg = is_instr.add_dst_pred_register();
+                    is::PredRegister* is_reg = is_instr.add_dst_pred_register();
                     is_reg->set_number(reg);
                     is_reg->set_value(value);
                     last_predregs[reg] = value;
@@ -378,7 +385,7 @@ public:
             first_instruction = false;
         }
 
-        for (const auto &memop : instruction.memops) {
+        for (const auto& memop : instruction.memops) {
             if (memop.pa) {
                 if (memop.is_store) {
                     // write memory events to instruction stream and record which bytes in memory have been written to
@@ -389,12 +396,12 @@ public:
                         size_t size_left = ((uint64_t)memop.bytes - size_written) % 8;
                         size_t granularity = (size_left == 0 ? 8 : size_left);
                         uint64_t val = 0;
-                        stateaccessor->read_memory(curr_pa, (uint8_t *)(&val), granularity);
+                        stateaccessor->read_memory(curr_pa, (uint8_t*)(&val), granularity);
 
                         is::Event event;
                         is::Memory memory;
                         memory.mutable_address()->set_pa(curr_pa);
-                        memory.set_value((char *)&val, granularity);
+                        memory.set_value((char*)&val, granularity);
                         event.mutable_memory()->CopyFrom(memory);
                         writer->write(event);
 
@@ -442,41 +449,46 @@ public:
         auto c_maint_type = cache_maint_type(adis_info);
         if (is_zva(c_maint_type)) {
             VirtAddr va = VirtAddr(instruction.source_regs.at(MSR_REG(instruction.opcode)));
-            Translation tr =
-                Translation(va, Bitfield(sysregs[TCR_EL1]), Bitfield(sysregs[TTBR0_EL1]), Bitfield(sysregs[TTBR1_EL1]));
-            record_translation(tr); // performs the translation in addition to recording the PTEs accessed
 
             // Create a memop on the instruction to hold the base virtual and
-            // physical addresses for the DC ZVA instrucion
-            is::MemOp *is_memop = is_instr.add_memop();
+            // physical addresses for the DC ZVA instruction.
+            is::MemOp* is_memop = is_instr.add_memop();
             is_memop->set_va(va.value());
 
-            if (!tr.faulted()) {
-                auto pa = tr.result_address();
-                is_memop->set_pa(pa.value());
+            if (flat_map) {
+                is_memop->set_pa(va.value());
+            } else {
+                Translation tr = Translation(
+                    va, Bitfield(sysregs[TCR_EL1]), Bitfield(sysregs[TTBR0_EL1]), Bitfield(sysregs[TTBR1_EL1]));
+                record_translation(tr); // performs the translation in addition to recording the PTEs accessed
 
-                // TODO This assumes that DCZID_EL0.BS is 6 (block size written
-                // by each access is 64 bytes). This matches the current QEMU
-                // implementation for all system-mode AArch64 processors.
-                PhysAddr aligned_pa = pa & ~((uint64_t)0x3f); // align to 64 bytes
-                char val[8] = {0};
-                for (uint64_t offset = 0; offset < 64; offset += 8) {
-                    is::Event event;
-                    is::Memory memory;
-                    memory.mutable_address()->set_pa(aligned_pa.value() + offset);
-                    memory.set_value(&val, 8 /*length in bytes*/);
-                    event.mutable_memory()->CopyFrom(memory);
-                    writer->write(event);
+                if (!tr.faulted()) {
+                    auto pa = tr.result_address();
+                    is_memop->set_pa(pa.value());
 
-                    update_written_mem_chunks(aligned_pa + offset, 8);
+                    // TODO This assumes that DCZID_EL0.BS is 6 (block size written
+                    // by each access is 64 bytes). This matches the current QEMU
+                    // implementation for all system-mode AArch64 processors.
+                    PhysAddr aligned_pa = pa & ~((uint64_t)0x3f); // align to 64 bytes
+                    char val[8] = {0};
+                    for (uint64_t offset = 0; offset < 64; offset += 8) {
+                        is::Event event;
+                        is::Memory memory;
+                        memory.mutable_address()->set_pa(aligned_pa.value() + offset);
+                        memory.set_value(&val, 8 /*length in bytes*/);
+                        event.mutable_memory()->CopyFrom(memory);
+                        writer->write(event);
+
+                        update_written_mem_chunks(aligned_pa + offset, 8);
+                    }
                 }
             }
         } else if (adis::prefetch(adis_info)) {
-            const auto &[ok, va_opt] = prefetch_va("ISTracer", instruction, adis_info);
+            const auto& [ok, va_opt] = prefetch_va("ISTracer", instruction, adis_info);
             if (!ok) {
                 return false; // encountered an error
             }
-            if (va_opt.has_value()) {
+            if (va_opt.has_value() && !flat_map) {
                 Translation tr = Translation(va_opt.value(),
                                              Bitfield(sysregs[TCR_EL1]),
                                              Bitfield(sysregs[TTBR0_EL1]),
@@ -600,7 +612,7 @@ private:
      may need to change depending on what future bug causes these unaccounted writes.
     */
     bool unaccounted_write(
-        size_t size1, uint64_t val1, size_t size2, uint64_t val2, size_t &new_size, uint64_t &new_val)
+        size_t size1, uint64_t val1, size_t size2, uint64_t val2, size_t& new_size, uint64_t& new_val)
     {
         if (size1 == size2) {
             new_size = size2;
@@ -676,7 +688,7 @@ private:
 
             if (stop_to_read) {
                 uint64_t val = 0;
-                stateaccessor->read_memory(read_start_pa, (uint8_t *)(&val), read_size);
+                stateaccessor->read_memory(read_start_pa, (uint8_t*)(&val), read_size);
 
                 std::map<PhysAddr, std::pair<uint64_t, size_t>>::iterator gt =
                     uninitialized_loads.find(PhysAddr(read_start_pa));
@@ -703,19 +715,19 @@ private:
         }
     }
 
-    void record_translation(archx::Translation &translation)
+    void record_translation(archx::Translation& translation)
     {
         while (!translation.done()) {
             uint64_t pte;
             PhysAddr pte_addr = translation.next_pte();
             assert(!(pte_addr.value() & 0x7));
-            stateaccessor->read_memory(pte_addr.value(), (uint8_t *)(&pte), 8);
+            stateaccessor->read_memory(pte_addr.value(), (uint8_t*)(&pte), 8);
             translation.pte_fetched(pte);
             handle_load_memop(pte_addr, 8);
         }
     }
 
-    bool check_translation(archx::Translation &translation, bool faulted, const PhysAddr answer)
+    bool check_translation(archx::Translation& translation, bool faulted, const PhysAddr answer)
     {
         // Check translation for correctness
         if (faulted != translation.faulted()) {
@@ -740,19 +752,19 @@ private:
         return true;
     }
 
-    bool check_record_translation(archx::Translation &translation, bool faulted, const PhysAddr answer)
+    bool check_record_translation(archx::Translation& translation, bool faulted, const PhysAddr answer)
     {
         record_translation(translation);
         return check_translation(translation, faulted, answer);
     }
 
-    bool handle_translations(const Instruction &instruction)
+    bool handle_translations(const Instruction& instruction)
     {
         Translation tr = Translation(instruction.pc, sysregs[TCR_EL1], sysregs[TTBR0_EL1], sysregs[TTBR1_EL1]);
         if (!check_record_translation(tr, !instruction.pa.has_value(), instruction.pa ? *instruction.pa : 0x0_pa))
             return false;
 
-        for (const auto &memop : instruction.memops) {
+        for (const auto& memop : instruction.memops) {
             Translation tr = Translation(memop.va, sysregs[TCR_EL1], sysregs[TTBR0_EL1], sysregs[TTBR1_EL1]);
             if (!check_record_translation(tr, !memop.pa.has_value(), memop.pa ? *memop.pa : 0x0_pa))
                 return false;
@@ -762,8 +774,8 @@ private:
 
     std::string filename, tmp_filename;
     std::map<archx::SysReg, archx::Bitfield> sysregs;
-    is::InstructionStreamWriter *writer = nullptr;
-    StateAccessor *stateaccessor;
+    is::InstructionStreamWriter* writer = nullptr;
+    StateAccessor* stateaccessor;
 
     /*
        Memory chunks which have been written to during this trace by store MemOps.
@@ -787,6 +799,7 @@ private:
     archx::EL current_el{EL0};
     bool current_pstate{0};
 
+    bool flat_map;
     bool debug_mode = false;
     bool record_dst_registers;
     bool first_instruction;

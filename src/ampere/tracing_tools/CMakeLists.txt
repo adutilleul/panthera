@@ -3,6 +3,9 @@
 
 cmake_minimum_required(VERSION 3.11)
 
+option(INSTRUCTION_TRACER_SC_API_SHIM
+       "Define the SystemC API-version stub when libsystemc uses a different SC_CPLUSPLUS" OFF)
+
 if(QEMU_ROOT)
     include_directories(${QEMU_ROOT}/include)
 endif()
@@ -36,6 +39,9 @@ set(INSTRUCTION_TRACER_SOURCES
     sveagen.cc
     sveagen.h)
 add_library(instruction_tracer MODULE ${INSTRUCTION_TRACER_SOURCES})
+if(INSTRUCTION_TRACER_SC_API_SHIM)
+    target_sources(instruction_tracer PRIVATE sc_api_shim.cc)
+endif()
 target_include_directories(instruction_tracer PRIVATE ${GLIB_INCLUDE_DIRS})
 target_compile_options(instruction_tracer PRIVATE "-Wno-unused-but-set-variable")
 # -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_56 is necessary to compile C++

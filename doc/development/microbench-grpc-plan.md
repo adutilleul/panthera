@@ -379,10 +379,62 @@ stream-message synthesis. Decide the exact shape at the start of Phase 2.
 
 #### Step 0.3 — User-mode QEMU + plugin feasibility
 
-Status: **BLOCKED** — needs the Ampere QEMU 8.0 binary from the Nix environment
-(`ampere.qemu`) and, for the Linux row, a patched kernel image. The system
-QEMU 11.1.3 cannot load the installed plugin (`undefined symbol:
-qemu_plugin_read_gdb_xml`).
+Status: **DONE for trace production (2026-11-04)**. The Ampere tracing-QEMU
+8.0.0 user-mode binary was built from the fork's tarball, and the plugin now
+produces a valid user-mode `.is.xz` from raw bytes.
+
+Result:
+- QEMU: `qemu-aarch64` 8.0.0 from
+  `AmpereComputing/tracing-qemu@39724d94`, built with `--enable-plugins` for
+  `aarch64-linux-user`.
+- Input: a static AArch64 loop binary (`tiny_arm`).
+- Triggers: `start-tracing-after-instructions=1000`,
+  `stop-tracing-after-measuring-instructions=500`, `max-traces=1`.
+- Plugin flags: `allow-missing-sysregs=true,flat-map=true`.
+- Output: `final_0.is.xz` (1.8 KiB, 500 measured instructions); `is_count`
+  parses it and reports a realistic mix (ADD/SUBS/LDR/branches/etc.).
+
+Plugin changes required:
+- `allow-missing-sysregs`: user-mode QEMU's GDB XML lacks system registers
+  such as `CNTKCTL_EL1`; the tracer now warns and skips them instead of
+  exiting.
+- `flat-map` for `.is`: identity VA=PA mapping. The tracer skips sysreg-based
+  translation, sets instruction/memop PAs to their VAs, and skips PTE/memory
+  records. This is also the mapping the microbench server uses.
+- `INSTRUCTION_TRACER_SC_API_SHIM`: opt-in SystemC API-version stub for hosts
+  whose `libsystemc` was built with a different `SC_CPLUSPLUS` (the plugin is
+  loaded into QEMU, which has no SystemC ABI symbol).
+
+Trigger limitations:
+- Use instruction-count, hint, or PC triggers. Perf-semihosting and most
+  system-register access are system-mode only.
+- `profile-comm`/`profile-pid` work, but a bare static binary can use the
+  instruction triggers directly.
+
+Remaining integration gap: `amperesys` still rejects the flat user-mode trace
+because it has no `TCR_EL1`/`TTBR*` page-table setup
+(`pwt.h starting_level() computation underflowed`). The trace itself is valid
+and is consumable by the flat-memory/in-process runner. Fix by generating a
+flat page table + synthetic TCR in the trace or by using the Step 2.1 flat
+mapping; this is not a QEMU/plugin blocker.
+
+Build recipe (host fallback, no Nix):
+- Download the tarball at the rev above; add the `ui/keycodemapdb` and
+  `tests/fp/berkeley-{testfloat,softfloat}-3` submodules (the tarball omits
+  them).
+- Use `uv venv --python 3.11` plus `meson==0.63.3` and `ninja`.
+- Configure: `--target-list=aarch64-linux-user --enable-plugins --disable-docs
+  --disable-tools --disable-guest-agent --disable-capstone --disable-slirp
+  --disable-werror --with-git-submodules=ignore`.
+- Host patch: QEMU 8.0's `linux-user/syscall.c` redefines `struct sched_attr`;
+  include `<linux/sched/types.h>` instead.
+- `ninja -C build`; only `qemu-aarch64` needs to link. The separate pc-bios
+  keymap generation can fail on a host without the Arabic xkb data and does not
+  affect user-mode.
+
+Gate 0.B: default QEMU mode is **user-mode with instruction-count triggers**
+and `flat-map=true,allow-missing-sysregs=true`. System-mode bare-metal remains
+the fallback for traces that need complete sysregs/page tables.
 
 Goal: confirm no-boot QEMU tracing works with the existing plugin.
 
@@ -395,7 +447,8 @@ Work:
   system-mode trace for the same region.
 
 Acceptance: a user-mode trace that runs through `amperesys`; documented trigger
-limitations.
+limitations. **Met for trace production; `amperesys` still needs a flat
+page-table/TCR setup.**
 
 Subagent: execution subagent runs the comparisons; review subagent checks that
 no plugin source changes leaked into this step.
