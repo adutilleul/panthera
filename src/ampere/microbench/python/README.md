@@ -28,8 +28,13 @@ The scripts generate `gen/microbench_pb2.py` with
         --code-hex d2800c80,d2800001,91000421,f1000400
     python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock --health
 
+By default only Unix-domain sockets are accepted; pass `--allow-remote` to bind
+TCP. Code is capped at 16 MiB, batches at 64 items, and each request must set
+`max_instructions` or `max_cycles`.
+
 ## Not yet
 
 - No simulation: `Run` echoes the requested instruction-word count.
 - `RunBatch` is implemented server-side but has no client flag yet.
-- No authentication or sandboxing; bind to a Unix socket or loopback only.
+- No authentication, sandboxing, or per-request memory limits beyond the code
+  size cap; bind to a Unix socket or loopback only.

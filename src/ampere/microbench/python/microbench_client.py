@@ -10,36 +10,26 @@ import grpc
 from microbench_server import DEFAULT_LISTEN, SERVICE, pb
 
 
-def _channel(address, timeout=5):
+def _call(address, method_name, request, request_type, response_type, timeout=5):
     channel = grpc.insecure_channel(address)
-    grpc.channel_ready_future(channel).result(timeout=timeout)
-    return channel
-
-
-def call(address, request, timeout=5):
-    channel = _channel(address, timeout)
     try:
+        grpc.channel_ready_future(channel).result(timeout=timeout)
         method = channel.unary_unary(
-            f"/{SERVICE}/Run",
-            request_serializer=pb.RunRequest.SerializeToString,
-            response_deserializer=pb.RunResponse.FromString,
+            f"/{SERVICE}/{method_name}",
+            request_serializer=request_type.SerializeToString,
+            response_deserializer=response_type.FromString,
         )
         return method(request, timeout=timeout)
     finally:
         channel.close()
 
 
+def call(address, request, timeout=5):
+    return _call(address, "Run", request, pb.RunRequest, pb.RunResponse, timeout)
+
+
 def health_check(address, timeout=5):
-    channel = _channel(address, timeout)
-    try:
-        method = channel.unary_unary(
-            f"/{SERVICE}/Health",
-            request_serializer=pb.HealthRequest.SerializeToString,
-            response_deserializer=pb.HealthResponse.FromString,
-        )
-        return method(pb.HealthRequest(), timeout=timeout)
-    finally:
-        channel.close()
+    return _call(address, "Health", pb.HealthRequest(), pb.HealthRequest, pb.HealthResponse, timeout)
 
 
 def parse_code(text):
@@ -60,11 +50,16 @@ def main(argv=None):
         print(health_check(args.listen))
         return 0
 
+    try:
+        code = parse_code(args.code_hex)
+    except ValueError:
+        parser.error(f"invalid --code-hex: {args.code_hex}")
+
     response = call(
         args.listen,
         pb.RunRequest(
             entry_pc=args.entry_pc,
-            code=parse_code(args.code_hex),
+            code=code,
             max_instructions=args.max_instructions,
         ),
     )

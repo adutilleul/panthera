@@ -28,12 +28,15 @@ GEN = HERE / "gen"
 
 DEFAULT_LISTEN = "unix:///tmp/panthera-microbench.sock"
 SERVICE = "ampere.microbench.Microbench"
+MAX_CODE_BYTES = 16 * 1024 * 1024
+MAX_BATCH = 64
 
 
 def ensure_generated():
-    """Generate the message stubs if they are not present."""
+    """Generate the message stubs if they are missing or stale."""
     GEN.mkdir(exist_ok=True)
-    if not (GEN / "microbench_pb2.py").exists():
+    generated = GEN / "microbench_pb2.py"
+    if not generated.exists() or generated.stat().st_mtime < PROTO.stat().st_mtime:
         subprocess.run(
             ["protoc", f"--python_out={GEN}", f"-I{PROTO_DIR}", str(PROTO)],
             check=True,
@@ -54,6 +57,10 @@ def _run_impl(request):
         raise ValueError("code is empty")
     if len(request.code) % 4 != 0:
         raise ValueError("code length must be a multiple of 4 bytes")
+    if len(request.code) > MAX_CODE_BYTES:
+        raise ValueError(f"code exceeds {MAX_CODE_BYTES} bytes")
+    if request.max_instructions == 0 and request.max_cycles == 0:
+        raise ValueError("at least one of max_instructions or max_cycles is required")
     words = len(request.code) // 4
     return pb.RunResponse(
         cycles=words,
@@ -72,6 +79,8 @@ def run(request, context):
 
 
 def run_batch(request, context):
+    if len(request.requests) > MAX_BATCH:
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"batch size exceeds {MAX_BATCH}")
     try:
         return pb.RunBatchResponse(responses=[_run_impl(item) for item in request.requests])
     except ValueError as error:
@@ -105,7 +114,21 @@ def _generic_handler():
     )
 
 
-def serve(address, workers=4):
+def serve(address, workers=4, allow_remote=False):
+    socket_path = None
+    for prefix in ("unix://", "unix:"):
+        if address.startswith(prefix):
+            socket_path = address[len(prefix) :]
+            break
+    if socket_path is None and not allow_remote:
+        raise ValueError("refusing a non-Unix listen address without --allow-remote")
+    if socket_path:
+        path = Path(socket_path)
+        if path.is_socket():
+            path.unlink()
+        elif path.exists():
+            raise ValueError(f"{socket_path} exists and is not a socket")
+
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
     server.add_generic_rpc_handlers((_generic_handler(),))
     if server.add_insecure_port(address) == 0:
@@ -114,10 +137,10 @@ def serve(address, workers=4):
     return server
 
 
-def run_self_test(address):
+def run_self_test(address, allow_remote=False):
     from microbench_client import call, health_check  # noqa: PLC0415
 
-    server = serve(address)
+    server = serve(address, allow_remote=allow_remote)
     try:
         response = call(
             address,
@@ -139,13 +162,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default=DEFAULT_LISTEN)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow a non-Unix listen address (default: Unix socket only)",
+    )
     args = parser.parse_args(argv)
 
-    if args.self_test:
-        run_self_test(args.listen)
-        return 0
-
-    server = serve(args.listen)
+    try:
+        if args.self_test:
+            run_self_test(args.listen, allow_remote=args.allow_remote)
+            return 0
+        server = serve(args.listen, allow_remote=args.allow_remote)
+    except ValueError as error:
+        parser.error(str(error))
     print(f"listening on {args.listen}", flush=True)
     try:
         server.wait_for_termination()

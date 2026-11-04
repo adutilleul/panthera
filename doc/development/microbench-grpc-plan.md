@@ -2,7 +2,7 @@
 
 Status: working plan (not yet a committed design)
 Audience: Panthera developers implementing the feature
-Last updated: 2026-11-03
+Last updated: 2026-11-04
 
 > This is an execution plan, not user-facing documentation. It is intentionally
 > not added to `mkdocs.yml` while it is a working plan. Add a nav entry only if
@@ -690,7 +690,10 @@ Work:
 - Define `microbench.proto`: `Run`, `RunBatch`, `Health`, optional
   `ListConfigs`.
 - Keep messages small; use `bytes` for code/data; define typed status errors.
-- Add CMake generation targets, reusing the dependency decision from Step 0.4.
+- For the sidecar, generate Python message stubs with `protoc --python_out`;
+  no gRPC plugin is needed because the service is registered with generic
+  handlers. If the C++ server is revived, add CMake gRPC generation targets
+  and the Nix `grpc` dependency at that point.
 
 Acceptance: proto compiles, generated code is not checked in, a stub server
 starts and answers `Health`.
@@ -783,9 +786,12 @@ signal/exit handling.
 
 ```
 src/ampere/microbench/
-  CMakeLists.txt
   proto/microbench.proto
-  server.cc
+  python/                    # v1 gRPC sidecar (Step 0.4)
+    microbench_server.py
+    microbench_client.py
+  CMakeLists.txt             # if/when the C++ server is revived
+  server.cc                  # C++ gRPC server (deferred)
   runner.{h,cc}
   trace_cache.{h,cc}
   trace_source.h
@@ -794,7 +800,7 @@ src/ampere/microbench/
   qemu/                      # bare-metal harness / ELF builder
   test/
 src/ampere/archx/
-  driver_code.{h,cc}         # phase 2
+  driver_code.{h,cc}         # Step 0.2 spike; hardened in phase 2
   code_image.{h,cc}          # phase 2
 src/ampere/instruction_stream/
   instruction_stream.{h,cc}  # fd reader, uncompressed option
@@ -802,6 +808,10 @@ src/ampere/tracing_tools/
   instruction_tracer.cc      # trigger/fd options, if needed
   is_tracer.h
 ```
+
+The sidecar does not link the C++ model. Step 3.2 decides between a persistent
+worker process (framed stdin/stdout or Unix socket) and one subprocess per
+request; prefer a persistent worker.
 
 Register the new subdirectory in `src/ampere/CMakeLists.txt`; register tests in
 the owning module's `CMakeLists.txt`. Do not add global include paths or
