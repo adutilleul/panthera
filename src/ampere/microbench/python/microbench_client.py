@@ -32,6 +32,10 @@ def health_check(address, timeout=5):
     return _call(address, "Health", pb.HealthRequest(), pb.HealthRequest, pb.HealthResponse, timeout)
 
 
+def stats_check(address, timeout=5):
+    return _call(address, "Stats", pb.StatsRequest(), pb.StatsRequest, pb.StatsResponse, timeout)
+
+
 def parse_code(text):
     words = [int(word, 16) for word in text.replace(" ", "").split(",") if word]
     return b"".join(word.to_bytes(4, "little") for word in words)
@@ -44,10 +48,16 @@ def main(argv=None):
     parser.add_argument("--entry-pc", type=lambda value: int(value, 0), default=0x400100)
     parser.add_argument("--max-instructions", type=int, default=1000)
     parser.add_argument("--health", action="store_true")
+    parser.add_argument("--stats", action="store_true")
     args = parser.parse_args(argv)
 
     if args.health:
         print(health_check(args.listen))
+        return 0
+    if args.stats:
+        response = stats_check(args.listen)
+        print("counters:", dict(response.counters))
+        print("timings:", dict(response.timings))
         return 0
 
     try:

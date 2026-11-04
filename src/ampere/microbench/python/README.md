@@ -56,14 +56,17 @@ python3 microbench_server.py --listen unix:///tmp/panthera-microbench.sock \
 python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock \
     --code-hex d2800c80,d2800001,91000421,f1000400 --max-instructions 1000
 python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock --health
+python3 microbench_client.py --listen unix:///tmp/panthera-microbench.sock --stats
 ```
 
 By default only Unix-domain sockets are accepted; pass `--allow-remote
 --allow-untrusted` to bind TCP. User-mode QEMU executes client code with host
 syscalls, so remote exposure without a sandbox is explicitly opt-in. Code is
 capped at 4 MiB, batches at 64 items, `max_instructions` at 1,000,000, and
-concurrent traces at 4 (`--max-concurrent`). `max_instructions` is required
-for trace generation.
+concurrent traces at 4 (`--max-concurrent`) plus 8 queued
+(`--queue-depth`). A full queue returns `RESOURCE_EXHAUSTED`; requests honor
+their RPC deadline. SIGTERM/SIGINT drains with `--shutdown-grace` seconds.
+`max_instructions` is required for trace generation.
 
 The harness places the code at `0x400100` after a small `_start` prologue that
 zeroes `x0`–`x29`, sets a fixed BSS stack, and exits after the code returns; a
@@ -102,7 +105,7 @@ removed and regenerated.
 ## Tests
 
 ```sh
-python3 -m unittest -v test_qemu_trace_source test_simulation_runner test_trace_cache
+python3 -m unittest -v test_qemu_trace_source test_simulation_runner test_trace_cache test_worker_pool
 ```
 
 The QEMU integration test runs only when `PANTHERA_QEMU_AARCH64`,

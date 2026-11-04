@@ -45,8 +45,16 @@ message HealthResponse {
   string version = 2;
 }
 
+message StatsRequest {}
+
+message StatsResponse {
+  map<string, uint64> counters = 1;
+  map<string, double> timings = 2;
+}
+
 service Microbench {
   rpc Run(RunRequest) returns (RunResponse);
   rpc RunBatch(RunBatchRequest) returns (RunBatchResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
 }

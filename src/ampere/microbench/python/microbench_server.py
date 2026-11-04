@@ -15,11 +15,14 @@ protocol and service shape are the same as the planned C++ server.
 import argparse
 import hashlib
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict, deque
 from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import grpc
@@ -42,12 +45,79 @@ _trace_source: QemuTraceSource | None = None
 _simulation_runner: SimulationRunner | None = None
 _trace_cache: TraceCache | None = None
 _result_cache: ResultCache | None = None
-_run_slots = threading.BoundedSemaphore(4)
+_executor: ThreadPoolExecutor | None = None
+_admission: threading.BoundedSemaphore | None = None
 
 
-def _set_max_concurrent(limit: int):
-    global _run_slots
-    _run_slots = threading.BoundedSemaphore(limit)
+class AdmissionError(RuntimeError):
+    pass
+
+
+class Metrics:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counters = defaultdict(int)
+        self._durations_ms = deque(maxlen=1024)
+
+    def inc(self, name: str, value: int = 1):
+        with self._lock:
+            self._counters[name] += value
+
+    def dec(self, name: str, value: int = 1):
+        with self._lock:
+            self._counters[name] -= value
+
+    def observe_ms(self, value: float):
+        with self._lock:
+            self._durations_ms.append(value)
+
+    def snapshot(self):
+        with self._lock:
+            counters = dict(self._counters)
+            counters["active"] = counters.get("running", 0)
+            counters["queued"] = max(0, counters.get("admitted", 0) - counters["active"])
+            values = sorted(self._durations_ms)
+
+            def percentile(p):
+                if not values:
+                    return 0.0
+                index = min(len(values) - 1, max(0, int(round((p / 100.0) * (len(values) - 1)))))
+                return values[index]
+
+            timings = {"request_p50_ms": percentile(50), "request_p95_ms": percentile(95)}
+        return counters, timings
+
+
+_metrics = Metrics()
+
+
+def _init_workers(workers: int, queue_depth: int):
+    global _executor, _admission, _metrics
+    if _executor is not None:
+        _executor.shutdown(wait=False)
+    _metrics = Metrics()
+    _admission = threading.BoundedSemaphore(workers + queue_depth)
+    _executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="microbench")
+
+
+def _submit(work):
+    if _executor is None or _admission is None:
+        raise RuntimeError("worker pool is not initialized")
+    if not _admission.acquire(blocking=False):
+        raise AdmissionError("worker queue is full")
+    _metrics.inc("admitted")
+    submitted = time.perf_counter_ns()
+
+    def job():
+        _metrics.inc("running")
+        try:
+            return work()
+        finally:
+            _metrics.dec("running")
+            _metrics.observe_ms((time.perf_counter_ns() - submitted) / 1e6)
+            _admission.release()
+
+    return _executor.submit(job)
 
 
 def ensure_generated():
@@ -128,6 +198,7 @@ def _run_impl(request, timeout_s=None):
         except (OSError, ValueError):
             cached_result = None
         if cached_result is not None:
+            _metrics.inc("cache_result")
             return pb.RunResponse(
                 cycles=cached_result.cycles,
                 instructions=cached_result.instructions,
@@ -143,7 +214,9 @@ def _run_impl(request, timeout_s=None):
         except (OSError, ValueError):
             trace = None
     cache_state = "disabled" if _trace_cache is None else ("trace" if trace is not None else "miss")
+    _metrics.inc(f"cache_{cache_state}")
     if trace is None:
+        _metrics.inc("trace_runs")
         trace = _trace_source.run(
             request.code,
             request.max_instructions,
@@ -162,6 +235,7 @@ def _run_impl(request, timeout_s=None):
             remaining = timeout_s - (time.monotonic() - started)
             if remaining <= 0:
                 raise TimeoutError("deadline exceeded before simulation")
+        _metrics.inc("sim_runs")
         simulation = _simulation_runner.run(
             trace.path,
             request.max_instructions,
@@ -190,49 +264,74 @@ def _run_impl(request, timeout_s=None):
     )
 
 
+def _map_job_error(context, error):
+    if isinstance(error, TimeoutError):
+        _metrics.inc("deadline_exceeded")
+        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
+    if isinstance(error, ValueError):
+        _metrics.inc("invalid_requests")
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+    if isinstance(error, (TraceError, SimulationError)):
+        _metrics.inc("failed_precondition")
+        context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+    _metrics.inc("internal_errors")
+    context.abort(grpc.StatusCode.INTERNAL, str(error))
+
+
 def run(request, context):
+    _metrics.inc("requests")
     remaining = context.time_remaining()
     if remaining is not None and remaining <= 0:
+        _metrics.inc("deadline_exceeded")
         context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
-    if not _run_slots.acquire(blocking=False):
-        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "too many concurrent traces")
     try:
-        return _run_impl(request, remaining)
-    except ValueError as error:
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-    except TimeoutError as error:
-        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
-    except (TraceError, SimulationError) as error:
-        context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
-    finally:
-        _run_slots.release()
+        future = _submit(lambda: _run_impl(request, remaining))
+    except AdmissionError as error:
+        _metrics.inc("rejected_full")
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+    try:
+        return future.result(timeout=remaining)
+    except Exception as error:  # noqa: BLE001 - mapped to a gRPC status below
+        _map_job_error(context, error)
 
 
 def run_batch(request, context):
+    _metrics.inc("requests")
     if len(request.requests) > MAX_BATCH:
+        _metrics.inc("rejected_batch")
         context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, f"batch size exceeds {MAX_BATCH}")
-    if not _run_slots.acquire(blocking=False):
-        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "too many concurrent traces")
-    try:
+    remaining = context.time_remaining()
+    if remaining is not None and remaining <= 0:
+        _metrics.inc("deadline_exceeded")
+        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
+
+    def work():
         responses = []
         for item in request.requests:
-            remaining = context.time_remaining()
-            if remaining is not None and remaining <= 0:
-                context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "deadline exceeded")
-            responses.append(_run_impl(item, remaining))
+            item_remaining = context.time_remaining()
+            if item_remaining is not None and item_remaining <= 0:
+                raise TimeoutError("deadline exceeded")
+            responses.append(_run_impl(item, item_remaining))
         return pb.RunBatchResponse(responses=responses)
-    except ValueError as error:
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-    except TimeoutError as error:
-        context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
-    except (TraceError, SimulationError) as error:
-        context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
-    finally:
-        _run_slots.release()
+
+    try:
+        future = _submit(work)
+    except AdmissionError as error:
+        _metrics.inc("rejected_full")
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+    try:
+        return future.result(timeout=remaining)
+    except Exception as error:  # noqa: BLE001 - mapped to a gRPC status below
+        _map_job_error(context, error)
 
 
 def health(request, context):
     return pb.HealthResponse(status="ok", version="spike")
+
+
+def stats(request, context):
+    counters, timings = _metrics.snapshot()
+    return pb.StatsResponse(counters=counters, timings=timings)
 
 
 def _generic_handler():
@@ -253,6 +352,11 @@ def _generic_handler():
                 health,
                 request_deserializer=pb.HealthRequest.FromString,
                 response_serializer=pb.HealthResponse.SerializeToString,
+            ),
+            "Stats": grpc.unary_unary_rpc_method_handler(
+                stats,
+                request_deserializer=pb.StatsRequest.FromString,
+                response_serializer=pb.StatsResponse.SerializeToString,
             ),
         },
     )
@@ -320,6 +424,8 @@ def main(argv=None):
         help="accept client code without a sandbox (required with --allow-remote)",
     )
     parser.add_argument("--max-concurrent", type=int, default=4)
+    parser.add_argument("--queue-depth", type=int, default=8)
+    parser.add_argument("--shutdown-grace", type=float, default=10.0)
     parser.add_argument("--qemu", default=None, help="path to tracing-QEMU qemu-aarch64")
     parser.add_argument("--plugin", default=None, help="path to libinstruction_tracer.so")
     parser.add_argument("--is-info", default=None, help="path to the is_info tool")
@@ -340,7 +446,11 @@ def main(argv=None):
         )
     if args.max_concurrent < 1:
         parser.error("--max-concurrent must be positive")
-    _set_max_concurrent(args.max_concurrent)
+    if args.queue_depth < 0:
+        parser.error("--queue-depth must be non-negative")
+    if args.shutdown_grace < 0:
+        parser.error("--shutdown-grace must be non-negative")
+    _init_workers(args.max_concurrent, args.queue_depth)
 
     try:
         trace_source = QemuTraceSource(
@@ -373,18 +483,33 @@ def main(argv=None):
             _result_cache = ResultCache(root / "results", per_cache)
         if args.self_test:
             run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
+            if _executor is not None:
+                _executor.shutdown(wait=True)
             return 0
         _trace_source = trace_source
-        server = serve(args.listen, allow_remote=args.allow_remote, workers=args.max_concurrent)
+        server = serve(
+            args.listen,
+            allow_remote=args.allow_remote,
+            workers=args.max_concurrent + args.queue_depth + 4,
+        )
     except ValueError as error:
         parser.error(str(error))
     except TraceError as error:
         parser.error(str(error))
+
+    def handle_shutdown(signum, frame):
+        server.stop(grace=args.shutdown_grace).wait()
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
     print(f"listening on {args.listen}", flush=True)
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
-        server.stop(0).wait()
+        server.stop(grace=args.shutdown_grace).wait()
+    finally:
+        if _executor is not None:
+            _executor.shutdown(wait=True, cancel_futures=False)
     return 0
 
 

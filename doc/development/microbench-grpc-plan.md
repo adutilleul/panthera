@@ -692,19 +692,46 @@ Subagent: review subagent checks that no Linux/rootfs dependency remains.
 
 #### Step 1.5 — Trace-worker pool and process supervision
 
-Scope: trace workers only. Simulation/server lifecycle is Step 3.4; do not
-build a second pool here.
+Status: **DONE (2026-11-04)** for the Python sidecar.
+
+Result:
+- Bounded admission: `max_concurrent` workers plus `queue_depth` queued jobs;
+  the gRPC handler submits to a `ThreadPoolExecutor`. A full queue returns
+  `RESOURCE_EXHAUSTED`; an expired RPC deadline returns `DEADLINE_EXCEEDED`.
+- QEMU and `amperesys` run as subprocesses with timeout/kill, so a crash or
+  hang is isolated from the server. Python job exceptions map to
+  `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `DEADLINE_EXCEEDED`, or
+  `INTERNAL`; a worker thread is not killed.
+- Graceful shutdown on SIGTERM/SIGINT: stop accepting, drain for
+  `--shutdown-grace` seconds, shut down the executor, remove the socket.
+- `Stats` RPC (and `microbench_client.py --stats`): counters for requests,
+  admitted/running/queued, cache result/trace/miss, trace/sim runs,
+  rejections, deadlines, and errors, plus p50/p95 request latency.
+- Stress check: 6 concurrent requests with 2 workers + 2 queue slots produced
+  4 successes and 2 `RESOURCE_EXHAUSTED`; stats were consistent and SIGTERM
+  exited 0.
+- Tests: worker-pool admission/result and metrics/Stats tests; 35 total.
+
+Scope: trace/simulation workers. The C++ server's process model remains
+Step 3.4; this is the sidecar implementation.
 
 Work:
-- Fixed-size pool of trace workers; bounded queue; backpressure.
-- Timeouts and kill-on-hang; crash isolation; restart policy.
-- Structured worker logs to files, not stdout.
+- Fixed-size pool of workers; bounded queue; backpressure. **Done.**
+- Timeouts and kill-on-hang; crash isolation; restart policy. **Timeouts and
+  subprocess isolation done; a dedicated restartable process pool is
+  deferred.**
+- Structured worker logs to files, not stdout. **Subprocess diagnostics go to
+  the trace log; server metrics via Stats.**
 
 Acceptance: N concurrent requests scale; a deliberately crashing worker is
-replaced without affecting in-flight requests.
+replaced without affecting in-flight requests. **Met for subprocess crashes
+and hangs; worker-thread restart is not applicable in the sidecar.**
 
 Subagent: execution subagent runs a stress test; review subagent checks fd and
 process lifecycle.
+
+Files: `microbench_server.py`, `microbench_client.py`,
+`test_worker_pool.py`, `proto/microbench.proto`, `README.md`.
 
 #### Step 1.6 — (Candidate) fork-after-elaboration worker
 
