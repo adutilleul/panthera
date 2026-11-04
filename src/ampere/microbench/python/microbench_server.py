@@ -364,12 +364,13 @@ def main(argv=None):
         if args.no_cache:
             _trace_cache = _result_cache = None
         else:
-            root = Path(
-                args.cache_dir or os.environ.get("PANTHERA_CACHE_DIR") or Path.home() / ".cache/panthera-microbench"
-            )
+            xdg_cache = os.environ.get("XDG_CACHE_HOME")
+            cache_base = Path(xdg_cache) if xdg_cache else Path.home() / ".cache"
+            root = Path(args.cache_dir or os.environ.get("PANTHERA_CACHE_DIR") or cache_base / "panthera-microbench")
             max_bytes = args.cache_size_mb * 1024 * 1024 if args.cache_size_mb > 0 else None
-            _trace_cache = TraceCache(root / "traces", max_bytes)
-            _result_cache = ResultCache(root / "results", max_bytes)
+            per_cache = max_bytes // 2 if max_bytes is not None else None
+            _trace_cache = TraceCache(root / "traces", per_cache)
+            _result_cache = ResultCache(root / "results", per_cache)
         if args.self_test:
             run_self_test(args.listen, allow_remote=args.allow_remote, trace_source=trace_source)
             return 0

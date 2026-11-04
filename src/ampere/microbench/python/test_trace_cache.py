@@ -64,6 +64,16 @@ class ConfigFingerprintTest(unittest.TestCase):
             child.write_text("setting 2\n")
             self.assertNotEqual(first, config_fingerprint(root))
 
+    def test_json_include_changes_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root.cfg"
+            data = Path(directory) / "data.json"
+            data.write_text('{"a": 1}')
+            root.write_text("value @data.json\n")
+            first = config_fingerprint(root)
+            data.write_text('{"a": 2}')
+            self.assertNotEqual(first, config_fingerprint(root))
+
     def test_missing_include(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "root.cfg"
@@ -129,6 +139,14 @@ class TraceCacheTest(unittest.TestCase):
             (cached.path.parent / "meta.json").write_text("{not json")
             self.assertIsNone(cache.get(key))
             self.assertTrue(cache.put(key, make_trace(source, "b")).path.exists())
+
+    def test_regular_file_at_key_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = TraceCache(Path(directory) / "cache")
+            key = cache.key({"x": 1})
+            (cache.root / key).write_text("not a directory")
+            self.assertIsNone(cache.get(key))
+            self.assertFalse((cache.root / key).exists())
 
     def test_missing_file_recovery(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -23,9 +23,12 @@ def file_fingerprint(path: str | os.PathLike | None, hash_contents: bool = False
     if path is None:
         return {"missing": True}
     entry = Path(path)
-    if not entry.exists():
+    try:
+        if not entry.exists():
+            return {"path": str(entry), "missing": True}
+        stat = entry.stat()
+    except OSError:
         return {"path": str(entry), "missing": True}
-    stat = entry.stat()
     fingerprint = {
         "path": str(entry.resolve()),
         "size": stat.st_size,
@@ -46,6 +49,7 @@ CFG_INCLUDE = re.compile(
     r"(?P<directive>cfg|append-cfg|override-cfg|:cfg|:append-cfg|:override-cfg)"
     r"\s+(?P<file>[^\s#]+)"
 )
+JSON_INCLUDE = re.compile(r"@([^\s,\]\}]+)")
 
 
 def config_fingerprint(path: str | os.PathLike | None, seen: set[str] | None = None, depth: int = 0) -> dict:
@@ -63,20 +67,24 @@ def config_fingerprint(path: str | os.PathLike | None, seen: set[str] | None = N
     if resolved in seen:
         return {"path": resolved, "cycle": True}
     seen.add(resolved)
-    digest = hashlib.sha256(entry.read_bytes()).hexdigest()
-    includes = []
     try:
+        digest = hashlib.sha256(entry.read_bytes()).hexdigest()
         lines = entry.read_text(errors="replace").splitlines()
     except OSError:
-        lines = []
+        return {"path": resolved, "error": "unreadable"}
+    includes = []
     for line in lines:
         match = CFG_INCLUDE.match(line)
-        if not match:
-            continue
-        child = Path(match.group("file").strip("'\""))
-        if not child.is_absolute():
-            child = entry.parent / child
-        includes.append(config_fingerprint(child, seen, depth + 1))
+        if match:
+            child = Path(match.group("file").strip("'\""))
+            if not child.is_absolute():
+                child = entry.parent / child
+            includes.append(config_fingerprint(child, seen, depth + 1))
+        for json_file in JSON_INCLUDE.findall(line):
+            child = Path(json_file.strip("'\""))
+            if not child.is_absolute():
+                child = entry.parent / child
+            includes.append({"json": file_fingerprint(child, hash_contents=True)})
     return {"path": resolved, "sha256": digest, "includes": includes}
 
 
@@ -178,6 +186,9 @@ class TraceCache:
 
     def get(self, key: str) -> TraceResult | None:
         entry = self.root / key
+        if entry.exists() and not entry.is_dir():
+            entry.unlink(missing_ok=True)
+            return None
         meta_path = entry / "meta.json"
         trace_path = entry / "trace.is.xz"
         mem_path = entry / "trace.mem"
@@ -225,7 +236,10 @@ class TraceCache:
             cached = self.get(key)
             if cached is not None:
                 return cached
-            shutil.rmtree(final, ignore_errors=True)
+            if final.is_dir():
+                shutil.rmtree(final, ignore_errors=True)
+            else:
+                final.unlink(missing_ok=True)
 
         tmp = self.root / f".tmp-{key}-{uuid.uuid4().hex}"
         tmp.mkdir()

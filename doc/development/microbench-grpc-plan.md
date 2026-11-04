@@ -545,8 +545,9 @@ Result:
 - Keys: SHA-256 over the code hash/length, entry, `max_instructions`, the flat
   mapping constants, QEMU/plugin/`is_info` fingerprints (path/size/mtime), the
   `amperesys` fingerprint, the **transitive config include tree** (`:cfg`,
-  `:append-cfg`, `:override-cfg` recursively hashed), and the pipeline Python
-  source fingerprints; both keys include a schema salt.
+  `:append-cfg`, `:override-cfg`, and `@file` JSON values recursively hashed),
+  and the pipeline Python source fingerprints; both keys include a schema
+  salt.
 - Trace cache: `<cache>/traces/<key>/{trace.is.xz,trace.mem,meta.json}`.
 - Result cache: `<cache>/results/<key>.json` with cycles/instructions/IPC/summary.
 - Atomic writes (temp + rename), LRU by mtime with a total size cap (default
