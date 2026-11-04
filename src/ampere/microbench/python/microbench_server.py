@@ -14,6 +14,7 @@ protocol and service shape are the same as the planned C++ server.
 
 import argparse
 import hashlib
+import math
 import os
 import signal
 import subprocess
@@ -83,7 +84,7 @@ class Metrics:
             def percentile(p):
                 if not values:
                     return 0.0
-                index = min(len(values) - 1, max(0, int(round((p / 100.0) * (len(values) - 1)))))
+                index = min(len(values) - 1, max(0, math.ceil((p / 100.0) * len(values)) - 1))
                 return values[index]
 
             timings = {

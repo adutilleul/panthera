@@ -290,7 +290,7 @@ Do not paste full logs, do not modify files, do not run other targets.
 | Locate symbols/files across the tree | `explore` | file:line list |
 | Run targeted tests | `general` | pass/fail + failing names |
 | Run `make check-format` | `general` | exit status + offending files |
-| Collect latency measurements | `general` | table of p50/p95 per phase |
+| Collect latency measurements | `general` | table of p50/p95/p99 per phase |
 | Review a diff | `general` | verdict + issues |
 | Inspect generated CMake/proto output | `general` | whether expected targets exist |
 | Compare two traces / run `is_validate` | `general` | mismatch count + first mismatch |
@@ -759,7 +759,7 @@ Result:
   was cut short and the server exited in ~105 ms with `--shutdown-grace 2`.
 - `Stats` RPC (and `microbench_client.py --stats`): counters for requests,
   admitted/running/queued/finished, cache result/trace/miss/hits, trace/sim
-  runs, rejections, deadlines, and errors, plus p50/p95 request latency.
+  runs, rejections, deadlines, and errors, plus p50/p95/p99 request latency.
 - Deadlines are absolute across the queue: queued jobs are cancelled (with a
   done callback that releases the admission permit and queued accounting), and
   the QEMU/`amperesys` subprocess timeouts are derived from the remaining

@@ -68,7 +68,7 @@ concurrent traces at 4 (`--max-concurrent`) plus 8 queued
 respect the RPC deadline, and running trace/simulation subprocesses use the
 remaining deadline. SIGTERM/SIGINT terminates in-flight QEMU/`amperesys`
 children, cancels queued work, waits up to `--shutdown-grace` seconds, and
-removes the socket. Use `--stats` for counters and p50/p95 latency.
+removes the socket. Use `--stats` for counters and p50/p95/p99 latency.
 `max_instructions` is required for trace generation.
 
 The harness places the code at `0x400100` after a small `_start` prologue that

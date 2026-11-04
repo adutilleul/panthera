@@ -5,27 +5,31 @@
 
 import argparse
 import sys
+import threading
 
 import grpc
 from microbench_server import DEFAULT_LISTEN, SERVICE, pb
 
 _channels: dict[str, grpc.Channel] = {}
+_channels_lock = threading.Lock()
 
 
 def _channel(address, timeout):
     """Return a cached channel; connection setup costs ~200 ms per channel."""
-    channel = _channels.get(address)
-    if channel is None:
-        channel = grpc.insecure_channel(address)
-        _channels[address] = channel
+    with _channels_lock:
+        channel = _channels.get(address)
+        if channel is None:
+            channel = grpc.insecure_channel(address)
+            _channels[address] = channel
     grpc.channel_ready_future(channel).result(timeout=timeout)
     return channel
 
 
 def reset_channels():
-    for channel in _channels.values():
-        channel.close()
-    _channels.clear()
+    with _channels_lock:
+        for channel in _channels.values():
+            channel.close()
+        _channels.clear()
 
 
 def _call(address, method_name, request, request_type, response_type, timeout=5):

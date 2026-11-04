@@ -11,6 +11,7 @@ pass ``--require`` in CI to turn that skip into a failure.
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -32,14 +33,18 @@ MAX_INSTRUCTIONS = 3
 
 
 def tools_available() -> bool:
-    return all(os.environ.get(name) and Path(os.environ[name]).exists() for name in TOOL_ENV)
+    if not all(os.environ.get(name) and Path(os.environ[name]).exists() for name in TOOL_ENV):
+        return False
+    return shutil.which("aarch64-linux-gnu-gcc") is not None
 
 
-def wait_for_socket(path: Path, timeout_s: float) -> None:
+def wait_for_socket(path: Path, timeout_s: float, server: subprocess.Popen) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if path.exists():
             return
+        if server.poll() is not None:
+            raise RuntimeError(f"server exited with {server.returncode} before creating {path}")
         time.sleep(0.05)
     raise RuntimeError(f"server did not create {path}")
 
@@ -58,7 +63,7 @@ def main(argv=None) -> int:
         return 2 if args.require else 0
 
     # Imported after the tool check so a skipped run needs no grpcio either.
-    from microbench_client import call, health_check, stats_check
+    from microbench_client import call, health_check, reset_channels, stats_check
     from microbench_server import pb
 
     with tempfile.TemporaryDirectory(prefix="panthera-microbench-smoke-") as directory:
@@ -77,10 +82,11 @@ def main(argv=None) -> int:
             "--shutdown-grace",
             "5",
         ]
+        result = 0
         with log_path.open("w") as log:
             server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
             try:
-                wait_for_socket(socket_path, args.timeout)
+                wait_for_socket(socket_path, args.timeout, server)
                 address = f"unix://{socket_path}"
                 if health_check(address).status != "ok":
                     raise RuntimeError("unhealthy server")
@@ -107,6 +113,7 @@ def main(argv=None) -> int:
                     f"ipc={cold.ipc:.3f} warm={warm.wall_ns} ns"
                 )
             finally:
+                reset_channels()
                 server.send_signal(signal.SIGTERM)
                 try:
                     server.wait(timeout=args.timeout)
@@ -115,11 +122,11 @@ def main(argv=None) -> int:
                     server.wait()
                 if server.returncode != 0:
                     print(log_path.read_text(), file=sys.stderr)
-                    return 1
+                    result = 1
                 if not args.keep and socket_path.exists():
                     print("server did not remove its socket", file=sys.stderr)
-                    return 1
-    return 0
+                    result = 1
+    return result
 
 
 if __name__ == "__main__":
